@@ -1,0 +1,132 @@
+@startuml Signal Stream Layout
+skinparam componentStyle rectangle
+title Signal Stream - System Overview
+
+rectangle "Source Data" as Service {
+  folder "Industrial Protocols" {
+    [OPC UA]
+    [Modbus TCP]
+    [MQTT]
+    [Serial]
+  }
+
+  [Base Service] as BaseService
+
+  note right of BaseService
+    Source Protocol Adapters extend
+    the base service class
+  end note
+  
+SchemaRegistry --> BaseService
+Instance --> BaseService : sample storage
+}
+
+note bottom of Service
+**Service**
+Runtime producer — process/module that connects to a data source or performs computations.
+Managed by ProjectManager (start/stop lifecycle).
+Can produce multiple streams.
+**Stream**
+Logical data channel from a service.
+Registered in StreamRegistry with metadata (schema, rate, fidelity, etc.).
+Can contain multiple signals (columns, metrics, channels).
+**Signal**
+Atomic data field within a stream — e.g., a single measurement, variable, or channel.
+Examples:
+temperature_stream → signals: temp_sensor1, temp_sensor2
+high_fidelity_stream → signals: x_position, y_position, z_position
+Signals share the same timestamp space within their stream.
+end note
+
+rectangle "Project Manager" as ProjectManager #LightSlateGrey {
+  rectangle "Storage Manager" as StorageManager {
+    ' Offline Storage Section
+    package "Offline Storage" #LightCoral {
+      [Offline Storage] as OfflineDataStorage
+
+      interface "IStorageBackend" as IBackend
+      note right of IBackend
+        Pluggable backend interface
+      end note
+
+      component "Parquet Backend" as ParquetBackend #PaleGreen
+      component "HDF5 Backend" as HDF5Backend #PaleTurquoise
+      component "CSV Backend" as CSVBackend #Wheat
+      component "Custom Backend" as CustomBackend #Lavender
+
+      OfflineDataStorage -down-> IBackend : "uses"
+      IBackend <|.. ParquetBackend
+      IBackend <|.. HDF5Backend
+      IBackend <|.. CSVBackend
+      IBackend <|.. CustomBackend
+
+      note bottom of ParquetBackend
+        Zero-copy columnar writes
+        via Arrow RecordBatch
+      end note
+    }
+
+    ' Online Storage Section
+    package "Online Storage" #LightYellow {
+      collections "Stream Holders" as StreamHolders
+      database "Stream Buffer" as StreamBuffer #WhiteSmoke {
+        collections "Signal Buffer" as SignalBuffer
+      }
+
+      StreamHolders -> StreamBuffer
+    }
+
+  [Buffer Handle] as BufferHandle
+  StreamBuffer -down-> BufferHandle
+  }
+
+  collections "Services" as services
+}
+
+note top of ProjectManager
+ProjectManager
+|_ Manages Stream Lifecycle (start/stop/configure)
+|_ Stream Instance 1
+  |_ Owns Service Instance A
+  |_ Produces Signal Set α
+  |_ Registers metadata → StreamRegistry
+|_ Stream Instance 2
+  |_ Owns Service Instance A (separate instance)
+  |_ Produces Signal Set β
+  |_ Registers metadata → StreamRegistry
+|_ Stream Instance 3
+  |_ Owns Service Instance B
+  |_ Produces Signal Set γ
+  |_ Registers metadata → StreamRegistry
+|_ StreamRegistry
+  |_ Stores stream + signal metadata
+  |_ Emits events (stream started, signals available)
+  |_ Notifies → StorageManager
+    |_ Allocates buffers per stream
+      |_ Buffers contain signals under schema
+end note
+
+rectangle "User Interface" {
+  frame "Windows" as Windows #LightGreen {
+    skinparam nodesep 0
+    skinparam ranksep 0
+    skinparam componentStyle rectangle
+    [Signal Browser] as SignalBrowser
+    [Live View] as LiveView
+    [FPS] as FPS
+    [Analysis View] as AnalysisView
+    [Console] as Console
+
+    Windows -right[hidden]-> SignalBrowser
+    Windows -right[hidden]-> LiveView
+    Windows -right[hidden]-> FPS
+    Windows -right[hidden]-> AnalysisView
+    Windows -right[hidden]-> Console
+  }
+}
+
+Windows -left(0)-> ProjectManager : Open/Save Project
+ProjectManager -(0)-> Service : Start/Stop Service
+services -right[dashed]- Service
+
+@enduml

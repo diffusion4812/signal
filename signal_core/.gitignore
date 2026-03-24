@@ -1,0 +1,8 @@
+*.obj
+*.pdb
+*.ilk
+*.exe
+.vs/
+CmakeFiles/
+Debug/
+build/

@@ -1,0 +1,31 @@
+{
+  "name": "MyProject",
+  "sources": [
+    {
+      "name": "RandomSource1",
+      "type": "Random",
+      "signals": [
+        {
+          "name": "signal1",
+          "type": "float64",
+          "unit": "V"
+        },
+        {
+          "name": "signal2",
+          "type": "float64",
+          "unit": "A"
+        },
+        {
+          "name": "signal3",
+          "type": "int32",
+          "unit": "rpm"
+        },
+        {
+          "name": "signal4",
+          "type": "float32",
+          "unit": "°C"
+        }
+      ]
+    }
+  ]
+}

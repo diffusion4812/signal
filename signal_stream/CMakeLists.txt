@@ -1,0 +1,15 @@
+cmake_minimum_required(VERSION 3.26)
+project(SignalStream VERSION 1.0 LANGUAGES CXX)
+
+set(CMAKE_CXX_STANDARD 20)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_CXX_EXTENSIONS OFF)
+
+add_subdirectory(libs/signal_stream_app)
+add_subdirectory(libs/signal_stream_core)
+add_subdirectory(libs/apache_bridge)
+add_subdirectory(libs/adapters/adapter_random)
+add_subdirectory(libs/adapters/adapter_mqtt)
+add_subdirectory(libs/adapters/adapter_signalforge)
+add_subdirectory(libs/adapters/adapter_opcua)
+add_subdirectory(app/signal_stream)

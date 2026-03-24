@@ -1,0 +1,33 @@
+{
+    "version": 6,
+    "configurePresets": [
+        {
+            "name": "default",
+            "displayName": "Default",
+            "binaryDir": "${sourceDir}/build",
+            "cacheVariables": {
+                "CMAKE_CXX_STANDARD": "20"
+            }
+        },
+        {
+            "name": "dev-loar02",
+            "displayName": "LOAR02 Dev Machine",
+            "inherits": "default",
+            "cacheVariables": {
+                "CMAKE_PREFIX_PATH": "C:/Users/LOAR02/Source/Libraries/avro/install;C:/Users/LOAR02/Source/Libraries/arrow/install;C:/Users/LOAR02/Source/Libraries/zlib/install;C:/Users/LOAR02/Source/Libraries/boost;C:/Users/LOAR02/Source/Libraries/spdlog/install;C:/Users/LOAR02/Source/Libraries/fmt/install;C:/Users/LOAR02/Source/Libraries/wxWidgets-3.3.1/install;C:/Users/LOAR02/Source/Libraries/glew-cmake/install;C:/Users/LOAR02/Source/Libraries/freetype/install"
+            }
+        }
+    ],
+    "buildPresets": [
+        {
+            "name": "debug",
+            "configurePreset": "dev-loar02",
+            "configuration": "Debug"
+        },
+        {
+            "name": "release",
+            "configurePreset": "dev-loar02",
+            "configuration": "Release"
+        }
+    ]
+}

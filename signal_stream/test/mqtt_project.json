@@ -1,0 +1,32 @@
+{
+  "name": "MyProject",
+  "sources": [
+    {
+      "name": "RandomSource1",
+      "type": "Random",
+      "signals": [
+        {
+          "name": "signal1",
+          "type": "float32",
+          "unit": "V"
+        }
+      ]
+    },
+    {
+      "name": "MQTTSource1",
+      "type": "MQTT",
+      "metadata": {
+        "host": "localhost",
+        "port": "1883",
+        "topic": "asd/asd"
+      },
+      "signals": [
+        {
+          "name": "signal1",
+          "type": "int32",
+          "unit": "V"
+        }
+      ]
+    }
+  ]
+}

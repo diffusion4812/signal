@@ -1,0 +1,17 @@
+find_package(Threads REQUIRED)
+
+add_executable(task_host
+    src/main.c
+)
+
+target_include_directories(task_host
+    PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/src
+)
+
+target_link_libraries(task_host
+    ${CMAKE_DL_LIBS}
+    Threads::Threads
+    task_host_core
+    dbg_pubsub
+)

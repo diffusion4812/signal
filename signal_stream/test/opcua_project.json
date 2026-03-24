@@ -1,0 +1,25 @@
+{
+  "name": "OPCUA_Monitoring_Project",
+  "sources": [
+    {
+      "name": "OPCUASource1",
+      "type": "OPCUA",
+      "metadata": {
+        "endpoint_url": "opc.tcp://opcuaserver.com:48010",
+        "publishing_interval_ms": "100",
+        "sampling_interval_ms": "50"
+      },
+      "signals": [
+        {
+          "name": "sensor_voltage",
+          "type": "float32",
+          "unit": "V",
+          "metadata": {
+            "node_id": "ns=1;s=Demo.Dynamic.Scalar.Float",
+            "access": "RO"
+          }
+        }
+      ]
+    }
+  ]
+}
