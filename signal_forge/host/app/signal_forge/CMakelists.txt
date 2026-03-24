@@ -1,0 +1,28 @@
+add_executable(signal_forge WIN32
+    src/app.cpp
+    src/main_frame.cpp
+    src/graph_serialization.cpp
+)
+
+target_include_directories(signal_forge
+    PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/src
+)
+
+target_link_libraries(signal_forge
+    PRIVATE
+        libglew_static
+        spdlog::spdlog
+        Freetype::Freetype
+        wx::wxcore
+        wx::wxaui
+        wx::wxstc
+        wx::net
+        wx::propgrid
+        glm::glm
+        Boost::json
+        SignalCore::ui
+        SignalForge::Graph
+        SignalForge::Generator
+        task_host_core
+)
