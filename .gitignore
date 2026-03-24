@@ -1,7 +1,6 @@
 # CMake generated build files (out-of-source builds)
 # It is recommended to use out-of-source builds with CMake
 # e.g., "build", "out", "cmake-build-debug" directories
-/build/
 /out/
 build/
 [Cc]makeFiles/
@@ -12,17 +11,17 @@ CmakeScripts/
 Testing/
 _CPack_Packages/
 
-# VS Code specific files
-# .vscode/ folder is ignored by default except for a few recommended files
-# which can be shared with the team (settings.json, launch.json, etc.)
-.vscode/
-# Ignore user-specific workspace files
+# 1. Ignore the directory's contents, but not the directory itself
+.vscode/*
+
+# 2. Now you can allow specific files
 !.vscode/settings.json
 !.vscode/tasks.json
 !.vscode/launch.json
 !.vscode/extensions.json
-# Ignore all other files in the .vscode folder
-.vscode/*
+
+# 3. Ignore everything else inside (redundant but safe)
+.vscode/.DS_Store
 
 # Operating System generated files
 .DS_Store # macOS
