@@ -248,7 +248,7 @@ namespace signal_stream {
     // Storage Access
     // ============================================================================
 
-    Orchestrator::SourceHandle Orchestrator::get_source_handle(const std::string& name) {
+    std::unique_ptr<SourceHandle> Orchestrator::get_source_handle(const std::string& name) {
         std::scoped_lock lock(mtx_);
         auto it = sources_.find(name);
         if (it == sources_.end()) {
@@ -257,7 +257,7 @@ namespace signal_stream {
 
         auto ptr = storage_.sources_[name];
 
-        return SourceHandle(ptr);
+        return std::make_unique<SourceHandle>(std::move(ptr));
     }
 
     // ============================================================================

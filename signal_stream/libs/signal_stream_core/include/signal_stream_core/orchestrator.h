@@ -19,6 +19,7 @@
 #include <signal_stream_core/source.h>
 #include <signal_stream_core/project.h>
 #include <signal_stream_core/hash.h>
+#include <signal_stream_core/source_handle.h>
 
 namespace signal_stream {
 
@@ -58,45 +59,8 @@ namespace signal_stream {
         // Source status
         bool is_one_source_running() const;
 
-        class SourceHandle {
-        private:
-            std::shared_ptr<StorageManager::SourceStorage> source_internal; // Points to the map entry
-
-        public:
-            SourceHandle() : source_internal(nullptr) {}
-            SourceHandle(std::shared_ptr<StorageManager::SourceStorage> ptr) : source_internal(ptr) {}
-
-            // The UI calls this to get the most recent data
-            std::shared_ptr<arrow::Table> snapshot() {
-                if (!source_internal) {
-                    throw std::runtime_error("SourceHandle: Attempted to snapshot an uninitialized or null source.");
-                }
-
-                std::lock_guard<std::recursive_mutex> lock(source_internal->mtx);
-
-                // 1. Ensure the schema exists
-                if (!source_internal->arrow_schema) {
-                    throw std::runtime_error("SourceHandle: Schema is null. Cannot build Table.");
-                }
-
-                // 2. Attempt to create the logical table
-                // Passing the explicit schema prevents the "At least one record batch" error
-                auto result = arrow::Table::FromRecordBatches(
-                    source_internal->arrow_schema, 
-                    source_internal->batches
-                );
-
-                // 3. If Arrow returns an error (e.g. Schema Mismatch), throw it
-                if (!result.ok()) {
-                    throw std::runtime_error("Arrow Table Creation Failed: " + result.status().ToString());
-                }
-
-                return result.MoveValueUnsafe();
-            }
-        };
-
         // Storage access
-        SourceHandle get_source_handle(const std::string& name);
+        std::unique_ptr<SourceHandle> get_source_handle(const std::string& name);
 
         // Project metadata
         ProjectData get_project_data() const;

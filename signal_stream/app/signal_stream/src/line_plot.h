@@ -100,12 +100,24 @@ struct YAxisConfig {
 // ---------------------------------------------------------------------------
 // PlotSeries – one named, coloured data series.
 // ---------------------------------------------------------------------------
+
+struct ChunkView {
+    const int64_t*  xs  = nullptr;
+    const float*    ys  = nullptr;
+    int64_t        len = 0;
+
+    // Bridge point from the tail of the previous chunk
+    // Valid only if hasBridge == true
+    bool    hasBridge   = false;
+    int64_t bridgeTime  = 0;
+    float  bridgeValue = 0.0;
+};
+
 struct PlotSeries {
-    std::vector<uint64_t> xs;
-    std::vector<double> ys;
-    wxString            name;
-    RGB                 colour = {0.0f, 0.0f, 0.0f};
-    int                 yAxisIndex = 0;  // Which Y-axis this series uses
+    std::vector<ChunkView> chunks;
+    wxString       name;
+    RGB            colour = {0.0f, 0.0f, 0.0f};
+    int            yAxisIndex = 0;  // Which Y-axis this series uses
 
     // --- Fill/shading support -----------------------------------------------
     bool   fillEnabled;
@@ -141,9 +153,8 @@ public:
     // Data – multi-series
     // -----------------------------------------------------------------------
     void SetSeries(const std::vector<PlotSeries>& series);
-    void AddSeries(const std::vector<uint64_t>& xs, const std::vector<double>& ys,
-                   const wxString& name, RGB colour, int yAxisIndex = 0);
     void ClearSeries();
+    void SyncYAxes();
 
     // -----------------------------------------------------------------------
     // X-Axes management
@@ -310,16 +321,127 @@ private:
     
     // Shader programs
     GLuint lineShader_;
+    struct ShaderUniforms {
+        GLint color = -1;
+        GLint xMin  = -1;
+        GLint xMax  = -1;
+        GLint yMin  = -1;
+        GLint yMax  = -1;
+    };
+    ShaderUniforms uniforms_;
     GLuint fillShader_;
     GLuint gridShader_;
     GLuint textShader_;
     
     // VBOs/VAOs for different elements
     struct SeriesBuffers {
-        unsigned int vao;
-        unsigned int vbo;
-        size_t vertexCount;
-        int yAxisIndex;
+        GLuint  vao          = 0;
+        GLuint  vbo_xs       = 0;
+        GLuint  vbo_ys       = 0;
+        GLsizei vertexCount  = 0;
+        GLsizei allocatedCap = 0;
+
+        int  yAxisIndex = 0;
+        bool isBoolean  = false;
+        RGB  colour;
+
+        float xMin = 0.f, xMax = 1.f;
+        float yMin = 0.f, yMax = 1.f;
+
+        // Timestamp scratch — CPU conversion unavoidable for int64 → float
+        std::vector<float> tScratch;
+
+        bool valid() const { return vao != 0; }
+
+        void Allocate(GLsizei capacity) {
+            glGenVertexArrays(1, &vao);
+            glGenBuffers(1, &vbo_xs);
+            glGenBuffers(1, &vbo_ys);
+
+            glBindBuffer(GL_ARRAY_BUFFER, vbo_xs);
+            glBufferData(GL_ARRAY_BUFFER, capacity * sizeof(float),
+                        nullptr, GL_STREAM_DRAW);
+
+            glBindBuffer(GL_ARRAY_BUFFER, vbo_ys);
+            glBufferData(GL_ARRAY_BUFFER, capacity * sizeof(float),
+                        nullptr, GL_STREAM_DRAW);
+
+            glBindVertexArray(vao);
+
+            glBindBuffer(GL_ARRAY_BUFFER, vbo_xs);
+            glVertexAttribPointer(0, 1, GL_FLOAT, GL_FALSE, 0, nullptr);
+            glEnableVertexAttribArray(0);
+
+            glBindBuffer(GL_ARRAY_BUFFER, vbo_ys);
+            glVertexAttribPointer(1, 1, GL_FLOAT, GL_FALSE, 0, nullptr);
+            glEnableVertexAttribArray(1);
+
+            glBindVertexArray(0);
+
+            allocatedCap = capacity;
+        }
+
+        void Free() {
+            if (vao)    { glDeleteVertexArrays(1, &vao);    vao    = 0; }
+            if (vbo_xs) { glDeleteBuffers(1, &vbo_xs);      vbo_xs = 0; }
+            if (vbo_ys) { glDeleteBuffers(1, &vbo_ys);      vbo_ys = 0; }
+            allocatedCap = 0;
+            vertexCount  = 0;
+            tScratch.clear();
+        }
+
+        // Ensures GPU buffers can hold at least `count` vertices
+        void EnsureCapacity(GLsizei count) {
+            if (count <= allocatedCap) return;
+
+            GLsizei newCap = count * 2;
+
+            glBindBuffer(GL_ARRAY_BUFFER, vbo_xs);
+            glBufferData(GL_ARRAY_BUFFER, newCap * sizeof(float),
+                        nullptr, GL_STREAM_DRAW);
+
+            glBindBuffer(GL_ARRAY_BUFFER, vbo_ys);
+            glBufferData(GL_ARRAY_BUFFER, newCap * sizeof(float),
+                        nullptr, GL_STREAM_DRAW);
+
+            allocatedCap = newCap;
+        }
+
+        // Upload timestamp scratch (full buffer — always CPU-side float array)
+        void UploadXs(GLsizei count) {
+            glBindBuffer(GL_ARRAY_BUFFER, vbo_xs);
+            glBufferData(GL_ARRAY_BUFFER, allocatedCap * sizeof(float),
+                        nullptr, GL_STREAM_DRAW);
+            glBufferSubData(GL_ARRAY_BUFFER, 0,
+                            count * sizeof(float), tScratch.data());
+        }
+
+        // Upload value channel — split into optional bridge + direct Arrow buffer
+        void UploadYs(GLsizei count,
+                    const float* arrowBuffer,
+                    GLsizei      arrowLen,
+                    const float* bridgeValue = nullptr)
+        {
+            glBindBuffer(GL_ARRAY_BUFFER, vbo_ys);
+            glBufferData(GL_ARRAY_BUFFER, allocatedCap * sizeof(float),
+                        nullptr, GL_STREAM_DRAW);
+
+            if (bridgeValue) {
+                // Prepend bridge point — one float
+                glBufferSubData(GL_ARRAY_BUFFER,
+                    0, sizeof(float), bridgeValue);
+
+                // Upload Arrow buffer directly — zero copy
+                glBufferSubData(GL_ARRAY_BUFFER,
+                    sizeof(float), arrowLen * sizeof(float), arrowBuffer);
+            } else {
+                // Direct upload — Arrow buffer untouched on CPU
+                glBufferSubData(GL_ARRAY_BUFFER,
+                    0, count * sizeof(float), arrowBuffer);
+            }
+
+            vertexCount = count;
+        }
     };
     std::vector<SeriesBuffers> seriesBuffers_;
     
@@ -385,6 +507,8 @@ private:
     /// Convert data coordinates to screen coordinates
     /// yAxisIndex specifies which Y-axis to use for vertical scaling
     void DataToScreen(uint64_t dx, double dy, int yAxisIndex, float& sx, float& sy) const;
+
+    std::pair<float, float> ComputeYRange(const std::vector<ChunkView>& chunks, float paddingFraction);
 
     // -----------------------------------------------------------------------
     // Buffer management

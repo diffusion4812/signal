@@ -3,6 +3,8 @@
 
 #include <vector>
 #include <unordered_map>
+#include <memory>
+#include <algorithm>
 
 #include <wx/wx.h>
 #include <wx/dnd.h>
@@ -10,16 +12,20 @@
 
 #include "line_plot.h"
 
-// Signal Stream
 #include <signal_stream_core/orchestrator.h>
+#include <signal_stream_core/source_handle.h>
 #include <signal_stream_core/service-storage.h>
 
 class SSPlot : public wxWindow {
 public:
-    wxTimer* timer_;
-    signal_stream::Orchestrator* pm_;
+    wxTimer*                      timer_;
+    signal_stream::Orchestrator*  pm_;
+
     SSPlot(wxWindow* parent, signal_stream::Orchestrator* pm);
 
+    // ----------------------------------------------------------------
+    // Drop target
+    // ----------------------------------------------------------------
     class DropTarget : public wxDropTarget {
     public:
         struct Payload {
@@ -27,77 +33,108 @@ public:
             std::string signal_id;
         };
 
-
-        DropTarget(SSPlot* ss_plot)
-            : wxDropTarget(new wxCustomDataObject(wxDataFormat("application/x-ssplot-payload"))),
-            ss_plot_(ss_plot) {}
+        explicit DropTarget(SSPlot* ss_plot)
+            : wxDropTarget(
+                new wxCustomDataObject(
+                    wxDataFormat("application/x-ssplot-payload")))
+            , ss_plot_(ss_plot)
+        {}
 
         wxDragResult OnData(wxCoord x, wxCoord y, wxDragResult def) override {
             if (!GetData()) return wxDragNone;
 
             auto* dataObj = dynamic_cast<wxCustomDataObject*>(GetDataObject());
             if (!dataObj) return wxDragNone;
-
-            if (dataObj->GetFormat() != wxDataFormat("application/x-ssplot-payload")) {
+            if (dataObj->GetFormat() !=
+                wxDataFormat("application/x-ssplot-payload"))
                 return wxDragNone;
-            }
 
-            const char* buf = static_cast<const char*>(dataObj->GetData());
+            const char*  buf   = static_cast<const char*>(dataObj->GetData());
             const size_t total = dataObj->GetSize();
-            
-            // Minimum check: must be able to hold at least two size_t variables
-            if (!buf || total < (sizeof(size_t) * 2)) {
-                return wxDragNone;
-            }
+            if (!buf || total < sizeof(size_t) * 2) return wxDragNone;
 
-            const char* p = buf;
+            const char* p   = buf;
             const char* end = buf + total;
 
-            // --- Read Source ID ---
+            // Read source ID
             size_t srcLen = 0;
-            memcpy(&srcLen, p, sizeof(size_t));
-            p += sizeof(size_t);
+            memcpy(&srcLen, p, sizeof(size_t)); p += sizeof(size_t);
+            if (p + srcLen > end) return wxDragNone;
+            std::string sourceId(p, srcLen);    p += srcLen;
 
-            if (p + srcLen > end) return wxDragNone; // Buffer overflow check
-            std::string sourceId(p, srcLen);
-            p += srcLen;
-
-            // --- Read Signal Name (the second string) ---
-            if (p + sizeof(size_t) > end) return wxDragNone; // Check for second length field
+            // Read signal name
+            if (p + sizeof(size_t) > end) return wxDragNone;
             size_t sigLen = 0;
-            memcpy(&sigLen, p, sizeof(size_t));
-            p += sizeof(size_t);
-
-            if (p + sigLen > end) return wxDragNone; // Buffer overflow check
+            memcpy(&sigLen, p, sizeof(size_t)); p += sizeof(size_t);
+            if (p + sigLen > end) return wxDragNone;
             std::string signalName(p, sigLen);
 
-            // --- Logic ---
-            if (ss_plot_) {
-                // Ensure the source exists in the plot
-                ss_plot_->sources_[sourceId] = ss_plot_->pm_->get_source_handle(sourceId);
-                
-                // Push the string name instead of an integer ID
-                // Assuming signals_[sourceId] is now a std::vector<std::string>
-                ss_plot_->signals_[sourceId].push_back(signalName);
-            }
+            if (ss_plot_)
+                ss_plot_->AddSignal(sourceId, signalName);
 
             return wxDragCopy;
         }
-
 
     private:
         SSPlot* ss_plot_;
     };
 
 private:
+    // ----------------------------------------------------------------
+    // Signal/source management — called from DropTarget via friend
+    // ----------------------------------------------------------------
+    void AddSignal(const std::string& sourceId,
+                   const std::string& signalName)
+    {
+        // Add source handle if not already present
+        if (sources_.find(sourceId) == sources_.end()) {
+            auto handle = pm_->get_source_handle(sourceId);
+            if (!handle) return;
 
-    std::unordered_map<std::string, signal_stream::Orchestrator::SourceHandle> sources_;
-    std::unordered_map<std::string, std::vector<std::string>> signals_;
+            sources_.emplace(sourceId, std::move(handle));
 
-    std::vector<PlotSeries> series_;
+            // Build column index cache for this source
+            if (auto schema = sources_.at(sourceId)->schema())
+                RebuildColumnIndices(sourceId, schema);
+        }
 
+        // Guard against duplicate signals on the same source
+        auto& sigs = signals_[sourceId];
+        if (std::find(sigs.begin(), sigs.end(), signalName) == sigs.end())
+            sigs.push_back(signalName);
+    }
+
+    // ----------------------------------------------------------------
+    // Data
+    // ----------------------------------------------------------------
+    std::unordered_map<std::string,
+        std::unique_ptr<signal_stream::SourceHandle>>   sources_;
+    std::unordered_map<std::string,
+        std::vector<std::string>>                       signals_;
+
+    std::vector<PlotSeries>                             series_;
+    std::unordered_map<std::string, int64_t>            last_row_counts_;
+    std::unordered_map<std::string,
+        std::unordered_map<std::string, int>>           column_indices_;
+
+    // ----------------------------------------------------------------
+    // UI
+    // ----------------------------------------------------------------
     wxBoxSizer* plot_sizer_;
-    LinePlot* plot_;
+    LinePlot*   plot_;
+
+    // ----------------------------------------------------------------
+    // Internal helpers
+    // ----------------------------------------------------------------
+    void RebuildColumnIndices(
+        const std::string&                    source_name,
+        const std::shared_ptr<arrow::Schema>& schema);
+
+    bool FillSeriesFromBatches(
+        PlotSeries&                                          ps,
+        const std::vector<std::shared_ptr<arrow::RecordBatch>>& batches,
+        int                                                  ts_idx,
+        int                                                  col_idx);
 
     void OnTimer(wxTimerEvent& event);
 

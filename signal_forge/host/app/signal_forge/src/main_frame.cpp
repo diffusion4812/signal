@@ -8,7 +8,6 @@
 
 #include "task_host_core/interface.h"
 #include "task_host_core/manifest.h"
-#include "task_host_core/debug.h"
 
 const int ID_NODE_CANVAS_GENERATE             = wxWindow::NewControlId();
 const int ID_NODE_CANVAS_COMPILE              = wxWindow::NewControlId();
@@ -217,15 +216,126 @@ void MainFrame::OnTransfer(wxCommandEvent& WXUNUSED(evt)) {
     }
 }
 
-void MainFrame::OnGoOnline(wxCommandEvent& WXUNUSED(evt)) {
-    logger_->info("Timer started...");
+void MainFrame::OnGoOnline(wxCommandEvent& WXUNUSED(evt))
+{
+    auto &graph = wxGetApp().get_graph();
 
+    /*
+     * Toggle behaviour: if already running, go offline.
+     */
     if (socket_timer_->IsRunning()) {
         socket_timer_->Stop();
+        logger_->info("Went offline — timer stopped.");
+
+        if (sub_) {
+            dbg_sub_destroy(sub_);
+            sub_ = nullptr;
+        }
+
+        probe_field_map_.clear();
+        inject_field_map_.clear();
+        return;
     }
-    else {
-        socket_timer_->Start(250);
+
+    /*
+     * Build field_ids and types arrays by walking the graph.
+     * Both ProbeNode (reads its input) and InjectNode (monitors its
+     * output) participate as read-only subscribers here.
+     */
+    std::vector<uint64_t>          field_ids;
+    std::vector<dbg_value_type_t>  types;
+
+    probe_field_map_.clear();
+    inject_field_map_.clear();
+
+    for (const std::unique_ptr<signal_forge::Node> &node : graph.Nodes()) {
+        // TODO: keep probenodes separate if they are being driven from the same output pin
+
+        /* ── ProbeNode: field_id comes from the pin driving input[0] ── */
+        if (auto *probe = dynamic_cast<signal_forge::ProbeNode*>(node.get())) {
+            uint64_t link_id = graph.FindLinkToPin(probe->inputs[0].id);
+            if (link_id == (uint64_t)-1) continue;
+
+            auto *link = graph.FindLink(link_id);
+            if (!link) continue;
+
+            uint64_t field_id = link->from_pin; /* pin id == field_id */
+
+            field_ids.push_back(field_id);
+            types.push_back(DBG_VT_F32);
+            probe_field_map_[field_id] = probe;
+
+            logger_->info("Subscribing ProbeNode field_id={}", field_id);
+            continue;
+        }
+
+        /* ── InjectNode: field_id comes from its own output pin ── */
+        if (auto *inject = dynamic_cast<signal_forge::InjectNode*>(node.get())) {
+            if (inject->outputs.empty()) continue;
+
+            uint64_t field_id = inject->outputs[0].id;
+
+            field_ids.push_back(field_id);
+            types.push_back(DBG_VT_F32);
+            inject_field_map_[field_id] = inject;
+
+            logger_->info("Subscribing InjectNode field_id={}", field_id);
+            continue;
+        }
     }
+
+    if (field_ids.empty()) {
+        logger_->warn("No subscribable nodes found in graph — not going online.");
+        return;
+    }
+
+    auto count = static_cast<uint16_t>(field_ids.size());
+
+    /* ── Create subscriber ── */
+    cfg_             = DBG_SUB_CONFIG_DEFAULT;
+    cfg_.host        = "127.0.0.1";
+    cfg_.data_port   = 9500;
+    cfg_.config_port = 9501;
+
+    sub_ = dbg_sub_create(&cfg_);
+    if (!sub_) {
+        logger_->error("Failed to create subscriber.");
+        return;
+    }
+
+    /* ── Subscribe — let the publisher assign an ID ── */
+    dbg_status_t rc = dbg_sub_subscribe(
+        sub_,
+        DBG_SUB_ID_AUTO,
+        field_ids.data(),
+        types.data(),
+        count,
+        250'000,      /* interval_us */
+        &layout_);
+
+    if (rc != DBG_OK) {
+        logger_->error("dbg_sub_subscribe failed: {}", (int)rc);
+        dbg_sub_destroy(sub_);
+        sub_ = nullptr;
+        return;
+    }
+
+    /*
+     * Capture the effective sub_id assigned by the publisher.
+     * This must be used for all future poll/unsubscribe calls.
+     */
+    effective_sub_id_ = layout_.sub_id;
+    logger_->info("Subscribed OK — assigned sub_id={}, {} field(s), "
+                  "frame_size={}, actual_interval={}us",
+                  effective_sub_id_,
+                  layout_.field_count,
+                  layout_.frame_size,
+                  layout_.actual_interval_us);
+
+    /* ── Start the poll timer to match the subscription interval ── */
+    constexpr int kTimerMs = 250;
+    socket_timer_->Start(kTimerMs);
+    logger_->info("Went online — timer started ({} ms).", kTimerMs);
 }
 
 void MainFrame::OnOpen(wxCommandEvent& WXUNUSED(evt))
@@ -453,82 +563,56 @@ bool MainFrame::CheckOrMakeConnection(wxSocketClient* socket_client) {
     return true; // Return true if already connected or if a new connection was successful
 }
 
-void MainFrame::OnSocketTimer(wxTimerEvent& WXUNUSED(evt)) {
-    auto &graph = wxGetApp().get_graph();
+void MainFrame::OnSocketTimer(wxTimerEvent& WXUNUSED(evt))
+{
+    if (!sub_) return;
 
-    for (const std::unique_ptr<signal_forge::Node> &node : graph.Nodes()) {
-        // Only handle ProbeNode instances
-        auto* probe = dynamic_cast<signal_forge::ProbeNode*>(node.get());
-        if (!probe) continue;
+    dbg_frame_result_t result;
+    int rc = dbg_sub_poll_iter(sub_, &layout_, &result);
 
-        // Find the link feeding the probe input[0]
-        uint64_t link_id = graph.FindLinkToPin(probe->inputs[0].id);
-        if (link_id == (uint64_t)-1) continue;
-
-        auto *link = graph.FindLink(link_id);
-        if (!link) continue;
-
-        uint64_t from_pin = link->from_pin;
-
-        // Map pin -> field_id. Replace this with your registry/lookup function.
-        // If you don't have a mapping, fall back to using the pin id as field_id.
-        uint64_t field_id = from_pin; // implement/replace in your code
-        if (field_id == (uint64_t)-1) field_id = from_pin;
-
-        // Build a READ DebugRequest
-        DebugRequest req;
-        memset(&req, 0, sizeof(req));
-        req.tx_id     = 0;
-        req.version   = 1;
-        req.op        = DBG_OP_READ;
-        req.field_id  = field_id;
-        req.value_type = DBG_VT_F32;
-        req.flags     = 0;
-        req.value_len = 0; // READ: no immediate value
-
-        CheckOrMakeConnection(socket_client_);
-        socket_client_->Write(&req, sizeof(req));
-        if (socket_client_->Error()) {
-            logger_->error("Socket write error when requesting field_id={}", (unsigned long long)field_id);
-            continue;
-        }
-
-        char buffer[sizeof(DebugReply)];
-        socket_client_->Read(buffer, sizeof(buffer));
-        int bytes_read = socket_client_->LastReadCount();
-        if (bytes_read < (int)sizeof(DebugReply)) {
-            logger_->error("Incomplete or no reply for field_id={} (read {} bytes)", (unsigned long long)field_id, bytes_read);
-            continue;
-        }
-        socket_client_->Close();
-
-        DebugReply *reply = reinterpret_cast<DebugReply*>(buffer);
-
-        // Basic validation
-        if (reply->tx_id != req.tx_id) {
-            logger_->warn("Reply tx_id ({}) does not match request ({}) for field_id={}", reply->tx_id, req.tx_id, (unsigned long long)field_id);
-            // We still proceed to check field_id/value type as best-effort
-        }
-
-        if (reply->field_id != field_id) {
-            logger_->warn("Reply field_id ({}) does not match requested field_id ({})", (unsigned long long)reply->field_id, (unsigned long long)field_id);
-            // continue; // optional: skip if you require exact match
-        }
-
-        if (reply->value_type != DBG_VT_F32) {
-            logger_->warn("Unexpected reply type/length for field_id={}: type={}",
-                          (unsigned long long)field_id, (int)reply->value_type);
-            continue;
-        }
-
-        // Update the probe with the returned float value
-        probe->value = reply->value.f32;
+    if (rc < 0) {
+        logger_->warn("dbg_sub_poll_iter error: {}", rc);
+        return;
     }
 
-    // Refresh canvas to reflect updated values
+    if (rc == 0) {
+        /* No frame available yet — normal during startup or a brief gap */
+        return;
+    }
+
+    /* ── Walk the iterator and update node values ── */
+    dbg_value_t val;
+    while (dbg_frame_iter_next(&result.iter, &val) == DBG_OK) {
+
+        if (result.iter.current_type != DBG_VT_F32) {
+            logger_->warn("Unexpected field type {} for field_id={}",
+                          (int)result.iter.current_type,
+                          result.iter.current_field_id);
+            continue;
+        }
+
+        const uint64_t field_id = result.iter.current_field_id;
+        const float    value    = val.f32;
+
+        /* ── ProbeNode ── */
+        auto probe_it = probe_field_map_.find(field_id);
+        if (probe_it != probe_field_map_.end()) {
+            probe_it->second->value = value;
+            continue;
+        }
+
+        /* ── InjectNode (monitor only — writes handled elsewhere) ── */
+        auto inject_it = inject_field_map_.find(field_id);
+        if (inject_it != inject_field_map_.end()) {
+            inject_it->second->observed_value = value;
+            continue;
+        }
+
+        logger_->warn("Frame contained unregistered field_id={}", field_id);
+    }
+
     canvas_->Refresh();
 }
-
 
 void MainFrame::OnNodeSelected(wxCommandEvent& evt) {
     wxString s = evt.GetString();
@@ -612,284 +696,122 @@ void MainFrame::OnNodeSelected(wxCommandEvent& evt) {
     node_prop_ctrl_->ExpandAll();
 }
 
+void MainFrame::WriteInjectNodeFields(signal_forge::InjectNode *inject)
+{
+    if (!sub_) {
+        logger_->warn("WriteInjectNodeFields called with no active subscriber.");
+        return;
+    }
+
+    uint64_t value_id  = (uint64_t)-1;
+    uint64_t enable_id = (uint64_t)-1;
+
+    for (const auto &s : inject->statics) {
+        if (s.name == "forced_value")  { value_id  = s.id; }
+        if (s.name == "force_enable")  { enable_id = s.id; }
+    }
+
+    /* ── Write forced_value ── */
+    if (value_id != (uint64_t)-1) {
+        dbg_value_t v;
+        memset(&v, 0, sizeof(v));
+        v.f32 = inject->forced_value;
+
+        dbg_status_t rc = dbg_sub_write(sub_, value_id, DBG_VT_F32, &v);
+        if (rc != DBG_OK) {
+            logger_->error("dbg_sub_write failed for forced_value "
+                           "field_id={} rc={}", value_id, (int)rc);
+        } else {
+            logger_->debug("forced_value written: {} -> field_id={}",
+                           inject->forced_value, value_id);
+        }
+    } else {
+        logger_->warn("InjectNode has no 'forced_value' static.");
+    }
+
+    /* ── Write force_enable ── */
+    if (enable_id != (uint64_t)-1) {
+        dbg_value_t v;
+        memset(&v, 0, sizeof(v));
+        v.f32 = inject->forcing_active ? 1.0f : 0.0f;
+
+        dbg_status_t rc = dbg_sub_write(sub_, enable_id, DBG_VT_F32, &v);
+        if (rc != DBG_OK) {
+            logger_->error("dbg_sub_write failed for force_enable "
+                           "field_id={} rc={}", enable_id, (int)rc);
+        } else {
+            logger_->debug("force_enable written: {} -> field_id={}",
+                           inject->forcing_active, enable_id);
+        }
+    } else {
+        logger_->warn("InjectNode has no 'force_enable' static.");
+    }
+}
+
 void MainFrame::OnPropertyGridChanged(wxPropertyGridEvent& e)
 {
-    wxPGProperty* pg = e.GetProperty();
+    wxPGProperty *pg = e.GetProperty();
     if (!pg) return;
 
     auto it = node_prop_ctrl_grid_to_properties_.find(pg);
     if (it == node_prop_ctrl_grid_to_properties_.end()) return;
 
-    signal_forge::Property& p = node_prop_ctrl_properties_[it->second];
-    if (p.readOnly) return; // Can't have been changed by the user
-    signal_forge::Node* node = wxGetApp().get_graph().FindNode(p.node_id);
-    if (!node) return; // No parent
+    signal_forge::Property &p = node_prop_ctrl_properties_[it->second];
+    if (p.readOnly) return;
 
-    const wxVariant& val = e.GetPropertyValue();
+    signal_forge::Node *node = wxGetApp().get_graph().FindNode(p.node_id);
+    if (!node) return;
+
+    const wxVariant &val = e.GetPropertyValue();
 
     switch (p.type) {
+
     case signal_forge::PropType::Float: {
         double d = val.GetDouble();
-        d = d;
-        *static_cast<float*>(p.ptr) = static_cast<float>(d);
-        
+        *static_cast<float *>(p.ptr) = static_cast<float>(d);
+
         if (p.name == "Value") {
-            if (auto* inject = dynamic_cast<signal_forge::InjectNode*>(node)) {
-                int value_id = -1;
-                int enable_id = -1;
-
-                for (const auto& s : inject->statics) {
-                    if (s.name == "forced_value") {
-                        value_id = s.id;
-                        break;
-                    }
-                }
-                for (const auto& s : inject->statics) {
-                    if (s.name == "force_enable") {
-                        enable_id = s.id;
-                        break;
-                    }
-                }
-
-                { // Update the VALUE
-                    // Build a WRITE DebugRequest
-                    DebugRequest req;
-                    memset(&req, 0, sizeof(req));
-                    req.tx_id     = 0;
-                    req.version   = 1;
-                    req.op        = DBG_OP_WRITE;
-                    req.field_id  = value_id;
-                    req.value_type = DBG_VT_F32;
-                    req.flags     = 0;
-                    req.value_len = 4;
-                    req.value.f32 = inject->forced_value; // Value currently set in the UI
-
-                    CheckOrMakeConnection(socket_client_);
-
-                    socket_client_->Write(&req, sizeof(req));
-                    if (socket_client_->Error()) {
-                        logger_->error("Socket write error when requesting field_id={}", (unsigned long long)value_id);
-                    }
-
-                    char buffer[sizeof(DebugReply)];
-                    socket_client_->Read(buffer, sizeof(buffer));
-                    int bytes_read = socket_client_->LastReadCount();
-                    if (bytes_read < (int)sizeof(DebugReply)) {
-                        logger_->error("Incomplete or no reply for field_id={} (read {} bytes)", (unsigned long long)value_id, bytes_read);
-                    }
-                    socket_client_->Close();
-
-                    DebugReply *reply = reinterpret_cast<DebugReply*>(buffer);
-
-                    // Basic validation
-                    if (reply->tx_id != req.tx_id) {
-                        logger_->warn("Reply tx_id ({}) does not match request ({}) for field_id={}", reply->tx_id, req.tx_id, (unsigned long long)value_id);
-                        // We still proceed to check field_id/value type as best-effort
-                    }
-
-                    if (reply->field_id != value_id) {
-                        logger_->warn("Reply field_id ({}) does not match requested field_id ({})", (unsigned long long)reply->field_id, (unsigned long long)value_id);
-                        // continue; // optional: skip if you require exact match
-                    }
-
-                    if (reply->value_type != DBG_VT_F32) {
-                        logger_->warn("Unexpected reply type/length for field_id={}: type={}",
-                                    (unsigned long long)value_id, (int)reply->value_type);
-                    }
-                    inject->forced_value = reply->value.f32;
-                }
-
-                { // Update the FORCE ENABLE
-                    // Build a WRITE DebugRequest
-                    DebugRequest req;
-                    memset(&req, 0, sizeof(req));
-                    req.tx_id     = 0;
-                    req.version   = 1;
-                    req.op        = DBG_OP_WRITE;
-                    req.field_id  = enable_id;
-                    req.value_type = DBG_VT_F32;
-                    req.flags     = 0;
-                    req.value_len = 4;
-                    req.value.f32 = (inject->forcing_active) ? 1.0f : 0.0f; // Value currently set in the UI
-
-                    CheckOrMakeConnection(socket_client_);
-
-                    socket_client_->Write(&req, sizeof(req));
-                    if (socket_client_->Error()) {
-                        logger_->error("Socket write error when requesting field_id={}", (unsigned long long)enable_id);
-                    }
-
-                    char buffer[sizeof(DebugReply)];
-                    socket_client_->Read(buffer, sizeof(buffer));
-                    int bytes_read = socket_client_->LastReadCount();
-                    if (bytes_read < (int)sizeof(DebugReply)) {
-                        logger_->error("Incomplete or no reply for field_id={} (read {} bytes)", (unsigned long long)enable_id, bytes_read);
-                    }
-                    socket_client_->Close();
-
-                    DebugReply *reply = reinterpret_cast<DebugReply*>(buffer);
-
-                    // Basic validation
-                    if (reply->tx_id != req.tx_id) {
-                        logger_->warn("Reply tx_id ({}) does not match request ({}) for field_id={}", reply->tx_id, req.tx_id, (unsigned long long)enable_id);
-                        // We still proceed to check field_id/value type as best-effort
-                    }
-
-                    if (reply->field_id != enable_id) {
-                        logger_->warn("Reply field_id ({}) does not match requested field_id ({})", (unsigned long long)reply->field_id, (unsigned long long)enable_id);
-                        // continue; // optional: skip if you require exact match
-                    }
-
-                    if (reply->value_type != DBG_VT_F32) {
-                        logger_->warn("Unexpected reply type/length for field_id={}: type={}",
-                                    (unsigned long long)enable_id, (int)reply->value_type);
-                    }
-                    inject->forcing_active = (reply->value.f32 != 0.0f) ? true : false;
-                }
+            if (auto *inject = dynamic_cast<signal_forge::InjectNode *>(node)) {
+                WriteInjectNodeFields(inject);
             }
         }
 
-        // Keep UI consistent if clamped
+        /* Keep UI consistent if value was clamped */
         if (d != val.GetDouble())
             node_prop_ctrl_->ChangePropertyValue(pg, d);
         break;
     }
+
     case signal_forge::PropType::Int: {
-        long l = val.GetLong();
+        long l   = val.GetLong();
         double d = static_cast<double>(l);
-        int out = static_cast<int>(d);
-        *static_cast<int*>(p.ptr) = out;
+        int out  = static_cast<int>(d);
+        *static_cast<int *>(p.ptr) = out;
 
         if (out != l)
             node_prop_ctrl_->ChangePropertyValue(pg, out);
         break;
     }
+
     case signal_forge::PropType::Bool: {
-        *static_cast<bool*>(p.ptr) = val.GetBool();
+        *static_cast<bool *>(p.ptr) = val.GetBool();
+
         if (p.name == "Active") {
-            if (auto* inject = dynamic_cast<signal_forge::InjectNode*>(node)) {
-                int value_id = -1;
-                int enable_id = -1;
-
-                for (const auto& s : inject->statics) {
-                    if (s.name == "forced_value") {
-                        value_id = s.id;
-                        break;
-                    }
-                }
-                for (const auto& s : inject->statics) {
-                    if (s.name == "force_enable") {
-                        enable_id = s.id;
-                        break;
-                    }
-                }
-
-                { // Update the VALUE
-                    // Build a WRITE DebugRequest
-                    DebugRequest req;
-                    memset(&req, 0, sizeof(req));
-                    req.tx_id     = 0;
-                    req.version   = 1;
-                    req.op        = DBG_OP_WRITE;
-                    req.field_id  = value_id;
-                    req.value_type = DBG_VT_F32;
-                    req.flags     = 0;
-                    req.value_len = 4;
-                    req.value.f32 = inject->forced_value; // Value currently set in the UI
-
-                    CheckOrMakeConnection(socket_client_);
-
-                    socket_client_->Write(&req, sizeof(req));
-                    if (socket_client_->Error()) {
-                        logger_->error("Socket write error when requesting field_id={}", (unsigned long long)value_id);
-                    }
-
-                    char buffer[sizeof(DebugReply)];
-                    socket_client_->Read(buffer, sizeof(buffer));
-                    int bytes_read = socket_client_->LastReadCount();
-                    if (bytes_read < (int)sizeof(DebugReply)) {
-                        logger_->error("Incomplete or no reply for field_id={} (read {} bytes)", (unsigned long long)value_id, bytes_read);
-                    }
-
-                    DebugReply *reply = reinterpret_cast<DebugReply*>(buffer);
-
-                    // Basic validation
-                    if (reply->tx_id != req.tx_id) {
-                        logger_->warn("Reply tx_id ({}) does not match request ({}) for field_id={}", reply->tx_id, req.tx_id, (unsigned long long)value_id);
-                        // We still proceed to check field_id/value type as best-effort
-                    }
-
-                    if (reply->field_id != value_id) {
-                        logger_->warn("Reply field_id ({}) does not match requested field_id ({})", (unsigned long long)reply->field_id, (unsigned long long)value_id);
-                        // continue; // optional: skip if you require exact match
-                    }
-
-                    if (reply->value_type != DBG_VT_F32) {
-                        logger_->warn("Unexpected reply type/length for field_id={}: type={}",
-                                    (unsigned long long)value_id, (int)reply->value_type);
-                    }
-                    inject->forced_value = reply->value.f32;
-                    socket_client_->Close();
-                }
-
-                { // Update the FORCE ENABLE
-                    // Build a WRITE DebugRequest
-                    DebugRequest req;
-                    memset(&req, 0, sizeof(req));
-                    req.tx_id     = 0;
-                    req.version   = 1;
-                    req.op        = DBG_OP_WRITE;
-                    req.field_id  = enable_id;
-                    req.value_type = DBG_VT_F32;
-                    req.flags     = 0;
-                    req.value_len = 4;
-                    req.value.f32 = (inject->forcing_active) ? 1.0f : 0.0f; // Value currently set in the UI
-
-                    CheckOrMakeConnection(socket_client_);
-
-                    socket_client_->Write(&req, sizeof(req));
-                    if (socket_client_->Error()) {
-                        logger_->error("Socket write error when requesting field_id={}", (unsigned long long)enable_id);
-                    }
-
-                    char buffer[sizeof(DebugReply)];
-                    socket_client_->Read(buffer, sizeof(buffer));
-                    int bytes_read = socket_client_->LastReadCount();
-                    if (bytes_read < (int)sizeof(DebugReply)) {
-                        logger_->error("Incomplete or no reply for field_id={} (read {} bytes)", (unsigned long long)enable_id, bytes_read);
-                    }
-
-                    DebugReply *reply = reinterpret_cast<DebugReply*>(buffer);
-
-                    // Basic validation
-                    if (reply->tx_id != req.tx_id) {
-                        logger_->warn("Reply tx_id ({}) does not match request ({}) for field_id={}", reply->tx_id, req.tx_id, (unsigned long long)enable_id);
-                        // We still proceed to check field_id/value type as best-effort
-                    }
-
-                    if (reply->field_id != enable_id) {
-                        logger_->warn("Reply field_id ({}) does not match requested field_id ({})", (unsigned long long)reply->field_id, (unsigned long long)enable_id);
-                        // continue; // optional: skip if you require exact match
-                    }
-
-                    if (reply->value_type != DBG_VT_F32) {
-                        logger_->warn("Unexpected reply type/length for field_id={}: type={}",
-                                    (unsigned long long)enable_id, (int)reply->value_type);
-                    }
-                    inject->forcing_active = (reply->value.f32 != 0.0f) ? true : false;
-                }
+            if (auto *inject = dynamic_cast<signal_forge::InjectNode *>(node)) {
+                WriteInjectNodeFields(inject);
             }
         }
         break;
     }
+
     case signal_forge::PropType::String: {
-        std::string& s = *static_cast<std::string*>(p.ptr);
+        std::string &s = *static_cast<std::string *>(p.ptr);
         s = std::string(val.GetString().ToUTF8());
         break;
     }
+
     case signal_forge::PropType::UInt64:
-        // If you want editable uint64, parse and validate here.
-        // Otherwise keep it read-only.
+        /* Keep read-only for now */
         break;
     }
 

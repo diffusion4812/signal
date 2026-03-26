@@ -14,6 +14,9 @@
 #include <spdlog/spdlog.h>
 #include <spdlog/sinks/base_sink.h>
 
+#include "dbg_pubsub.h"
+#include "dbg_util.h"
+
 // Define a new sink class
 class wxTextCtrlSink : public spdlog::sinks::base_sink<std::mutex> {
 public:
@@ -117,6 +120,7 @@ private:
     void OnSaveAs(wxCommandEvent&   WXUNUSED(evt));
     void OnExit(wxCommandEvent&     WXUNUSED(evt));
     void OnNodeSelected(wxCommandEvent& evt);
+    void WriteInjectNodeFields(signal_forge::InjectNode *inject);
     void OnPropertyGridChanged(wxPropertyGridEvent& evt);
 
     wxString m_currentFilePath;
@@ -134,9 +138,17 @@ private:
     std::shared_ptr<spdlog::logger> logger_;
 
     wxSocketClient* socket_client_;
+
+    // Online polling & debug
     wxTimer* socket_timer_;
     bool CheckOrMakeConnection(wxSocketClient* socket_client);
     void OnSocketTimer(wxTimerEvent& WXUNUSED(evt));
+    dbg_sub_config_t    cfg_    = {};
+    dbg_subscriber_t   *sub_    = nullptr;
+    dbg_sub_layout_t    layout_ = {};
+    uint16_t            effective_sub_id_ = DBG_SUB_ID_AUTO;
+    std::unordered_map<uint64_t, signal_forge::ProbeNode*>  probe_field_map_;
+    std::unordered_map<uint64_t, signal_forge::InjectNode*> inject_field_map_;
 
     void SetupCppHighlighting(wxStyledTextCtrl* ctrl);
 };

@@ -244,27 +244,43 @@ dbg_status_t dbg_sub_subscribe(dbg_subscriber_t        *sub,
     if (resp_len < dbg_subscribe_ack_size(ack->field_count))
         return DBG_ERR_MALFORMED;
 
-    if (ack->sub_id != sub_id) return DBG_ERR_MALFORMED;
+    /*
+     * If the caller requested auto-assignment (DBG_SUB_ID_AUTO), the
+     * publisher echoes the assigned ID in the ACK.  Capture it here so
+     * all subsequent storage uses the real ID.
+     *
+     * For explicit IDs, the ACK must echo back exactly what was requested;
+     * any mismatch indicates a protocol error.
+     */
+    uint16_t effective_id;
 
-    /* Replace any existing entry for this sub_id */
-    sub_client_entry_t *existing = sub_find_entry(sub, sub_id);
+    if (sub_id == DBG_SUB_ID_AUTO) {
+        if (ack->sub_id == DBG_SUB_ID_AUTO) return DBG_ERR_MALFORMED;
+        effective_id = ack->sub_id;
+    } else {
+        if (ack->sub_id != sub_id) return DBG_ERR_MALFORMED;
+        effective_id = sub_id;
+    }
+
+    /* Replace any existing entry for this effective ID */
+    sub_client_entry_t *existing = sub_find_entry(sub, effective_id);
     if (existing) sub_free_entry(existing);
 
     sub_client_entry_t *entry = sub_alloc_entry(sub);
     if (!entry) return DBG_ERR_TOO_MANY_SUBS;
 
     entry->active               = 1;
-    entry->sub_id               = sub_id;
+    entry->sub_id               = effective_id;
     entry->last_sequence        = 0;
     entry->sequence_initialised = 0;
     memset(&entry->stats, 0, sizeof(entry->stats));
 
-    /* Build layout from ack */
-    dbg_sub_layout_t *layout       = &entry->layout;
-    layout->sub_id                 = sub_id;
-    layout->field_count            = ack->field_count;
-    layout->frame_size             = ack->frame_size;
-    layout->actual_interval_us     = ack->actual_interval_us;
+    /* Build layout from ACK */
+    dbg_sub_layout_t *layout   = &entry->layout;
+    layout->sub_id             = effective_id;
+    layout->field_count        = ack->field_count;
+    layout->frame_size         = ack->frame_size;
+    layout->actual_interval_us = ack->actual_interval_us;
 
     for (uint16_t i = 0; i < ack->field_count; i++) {
         const dbg_sub_field_ack_t *fa = &ack->fields[i];
@@ -381,6 +397,66 @@ int dbg_sub_poll(dbg_subscriber_t *sub,
     sub_check_heartbeat(sub);
 
     return frames_received;
+}
+
+int dbg_sub_poll_iter(dbg_subscriber_t  *sub,
+                      dbg_sub_layout_t  *layout,
+                      dbg_frame_result_t *result)
+{
+    if (!sub || !layout || !result) return (int)DBG_ERR_INTERNAL;
+
+    const int max_per_poll = 256;
+
+    for (int m = 0; m < max_per_poll; m++) {
+        int n = dbg_socket_recvfrom(&sub->data_sock,
+                                    sub->data_rx_buf,
+                                    sizeof(sub->data_rx_buf),
+                                    NULL);
+        if (n == 0) break;  /* buffer empty */
+        if (n < 0)  break;  /* socket error */
+
+        if ((uint32_t)n < sizeof(dbg_frame_t)) continue;
+
+        const dbg_frame_t *frame = (const dbg_frame_t *)sub->data_rx_buf;
+
+        if (dbg_header_validate(&frame->header) != DBG_OK) continue;
+        if (frame->header.msg_type != DBG_MSG_FRAME)       continue;
+
+        uint32_t expected_size = dbg_frame_wire_size(frame->frame_size);
+        if ((uint32_t)n < expected_size) continue;
+
+        sub_client_entry_t *entry = sub_find_entry(sub, frame->sub_id);
+        if (!entry) continue;
+
+        sub_track_sequence(entry, frame->sequence);
+
+        entry->stats.frames_received++;
+        entry->stats.bytes_received          += (uint32_t)n;
+        entry->stats.last_frame_timestamp_us  = frame->timestamp_us;
+        entry->stats.last_sequence            = frame->sequence;
+
+        /* ── Populate result ── */
+        result->sub_id       = frame->sub_id;
+        result->sequence     = frame->sequence;
+        result->timestamp_us = frame->timestamp_us;
+        result->payload_size = frame->frame_size;
+
+        /* Copy payload into stable storage before data_rx_buf is reused */
+        uint16_t copy_size = frame->frame_size;
+        if (copy_size > sizeof(result->payload))
+            copy_size = sizeof(result->payload);
+
+        memcpy(result->payload, frame->payload, copy_size);
+
+        /* Initialise iterator against the stable copy */
+        dbg_frame_iter_init(&result->iter, result->payload, layout);
+
+        sub_check_heartbeat(sub);
+        return 1;
+    }
+
+    sub_check_heartbeat(sub);
+    return 0;
 }
 
 /* ══════════════════════════════════════════════════════════════════════════

@@ -25,4 +25,5 @@ target_link_libraries(signal_forge
         SignalForge::Graph
         SignalForge::Generator
         task_host_core
+        dbg_pubsub
 )

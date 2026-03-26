@@ -33,7 +33,7 @@
 #include <adapter_signalforge/signalforge_adapter.h>
 #include <adapter_signalforge/signalforge_adapter_actions.h>
 
-#include <adapter_opcua/opcua_adapter.h>
+//#include <adapter_opcua/opcua_adapter.h>
 
 #include <boost/throw_exception.hpp>
 
@@ -52,7 +52,7 @@ namespace signal_stream {
     REGISTER_SOURCE_TYPE_WITH_META("Random", RandomAdapter);
     REGISTER_SOURCE_TYPE_WITH_META("MQTT", MQTTSource);
     REGISTER_SOURCE_TYPE_WITH_META("SignalForge", SignalForgeAdapter);
-    REGISTER_SOURCE_TYPE_WITH_META("OPCUA", OPCUASource);
+    //REGISTER_SOURCE_TYPE_WITH_META("OPCUA", OPCUASource);
 }
 
 class MyApp : public wxApp {

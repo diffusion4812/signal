@@ -2,6 +2,7 @@
 #include <GL/gl.h>
 #include <cmath>
 #include <sstream>
+#include <set>
 #include <iomanip>
 #include <chrono>
 #include <type_traits>
@@ -152,7 +153,7 @@ static const int glAttribs[] = {
     WX_GL_MAJOR_VERSION, 3,
     WX_GL_MINOR_VERSION, 3,
     WX_GL_SAMPLE_BUFFERS, 1,     // MSAA
-    WX_GL_SAMPLES, 2,            // MSAA
+    WX_GL_SAMPLES, 4,            // MSAA
     0
 };
 
@@ -169,6 +170,25 @@ uniform mat4 u_proj;
 
 void main() {
     gl_Position = u_proj * vec4(aPos, 0.0, 1.0);
+}
+)";
+
+static const char* lineShader = R"(
+#version 330 core
+
+layout (location = 0) in float aTime;    // raw timestamp (float or double)
+layout (location = 1) in float aValue;   // raw signal value
+
+uniform float uXMin;
+uniform float uXMax;
+uniform float uYMin;
+uniform float uYMax;
+
+void main() {
+    // Map data coordinates → NDC [-1, 1]
+    float nx = (aTime  - uXMin) / (uXMax - uXMin) * 2.0 - 1.0;
+    float ny = (aValue - uYMin) / (uYMax - uYMin) * 2.0 - 1.0;
+    gl_Position = vec4(nx, ny, 0.0, 1.0);
 }
 )";
 
@@ -253,7 +273,8 @@ LinePlot::~LinePlot()
         // Delete buffers
         for (auto& sb : seriesBuffers_) {
             glDeleteVertexArrays(1, &sb.vao);
-            glDeleteBuffers(1, &sb.vbo);
+            glDeleteBuffers(1, &sb.vbo_xs);
+            glDeleteBuffers(1, &sb.vbo_ys);
         }
         
         if (gridVAO_) glDeleteVertexArrays(1, &gridVAO_);
@@ -282,24 +303,39 @@ void LinePlot::SetSeries(const std::vector<PlotSeries>& series)
     Refresh();
 }
 
-void LinePlot::AddSeries(const std::vector<uint64_t>& xs, const std::vector<double>& ys,
-                          const wxString& name, RGB colour, int yAxisIndex)
-{
-    PlotSeries s;
-    s.xs = xs; s.ys = ys;
-    s.name = name;
-    s.colour = colour;
-    s.yAxisIndex = yAxisIndex;
-    series_.push_back(s);
-    buffersDirty_ = true;
-    Refresh();
-}
-
 void LinePlot::ClearSeries()
 {
     series_.clear();
     buffersDirty_ = true;
     Refresh();
+}
+
+void LinePlot::SyncYAxes()
+{
+    std::set<int> usedIndices;
+    for (const auto& s : series_)
+        usedIndices.insert(s.yAxisIndex);
+
+    const int required = usedIndices.empty()
+        ? 0
+        : *usedIndices.rbegin() + 1;
+
+    const int current = static_cast<int>(yAxes_.size());
+
+    if (required == current) return;
+
+    if (required > current) {
+        for (int i = current; i < required; ++i) {
+            YAxisConfig axis;
+            axis.min       =  0.0;
+            axis.max       =  1.0;
+            axis.autoscale = true;
+            axis.colour    = plot_colour_palette_[i % 5];
+            yAxes_.push_back(axis);
+        }
+    } else {
+        yAxes_.resize(required);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -510,7 +546,13 @@ void LinePlot::InitializeGL()
     glBindVertexArray(0);
 
     // Compile shaders
-    lineShader_ = signal_ui::CompileShader(simpleVertexShader,          solidColourFragmentShader);
+    lineShader_ = signal_ui::CompileShader(lineShader,                  solidColourFragmentShader);
+    uniforms_.color = glGetUniformLocation(lineShader_, "u_color");
+    uniforms_.xMin  = glGetUniformLocation(lineShader_, "uXMin");
+    uniforms_.xMax  = glGetUniformLocation(lineShader_, "uXMax");
+    uniforms_.yMin  = glGetUniformLocation(lineShader_, "uYMin");
+    uniforms_.yMax  = glGetUniformLocation(lineShader_, "uYMax");
+
     fillShader_ = signal_ui::CompileShader(simpleVertexShader,          solidColourFragmentShader);
     gridShader_ = signal_ui::CompileShader(simpleVertexShader,          solidColourFragmentShader);
     textShader_ = signal_ui::CompileShader(signal_ui::textVertexShader, signal_ui::textFragmentShader);
@@ -685,53 +727,67 @@ int LinePlot::YAxisScreenX(int yAxisIndex) const
 // ---------------------------------------------------------------------------
 void LinePlot::ApplyAutoscale()
 {
-    constexpr double kPad = 0.05;  // 5% padding
+    constexpr double kPad = 0.05;
 
-    // X-axis autoscale
+    // --- X-axis autoscale ---
     if (autoscaleX_) {
-        bool hasX = false;
-        uint64_t xlo = UINT64_MAX, xhi = 0;
-        
+        bool    hasX = false;
+        int64_t xlo  = std::numeric_limits<int64_t>::max();
+        int64_t xhi  = std::numeric_limits<int64_t>::lowest();
+
         for (const auto& s : series_) {
-            if (s.xs.empty()) continue;
-            for (uint64_t v : s.xs) {
-                if (v < xlo) xlo = v;
-                if (v > xhi) xhi = v;
+            for (const auto& cv : s.chunks) {
+                for (int64_t i = 0; i < cv.len; ++i) {
+                    if (cv.xs[i] < xlo) xlo = cv.xs[i];
+                    if (cv.xs[i] > xhi) xhi = cv.xs[i];
+                }
+                hasX = true;
             }
-            hasX = true;
         }
-        
+
         if (hasX) {
-            uint64_t range = xhi - xlo;
-            if (range < 1e-12) { xlo -= 0.5; xhi += 0.5; range = 1.0; }
-            xMin_ = (range > 0) ? xlo - (range / 20) : xlo - 500000000ULL;
-            xMax_ = (range > 0) ? xhi + (range / 20) : xhi + 500000000ULL;
+            int64_t range = xhi - xlo;
+            if (range < 1) {
+                xlo -= 500'000'000LL;
+                xhi += 500'000'000LL;
+                range = xhi - xlo;
+            }
+            int64_t pad = range / 20;
+            xMin_ = xlo - pad;
+            xMax_ = xhi + pad;
         }
     }
-    
-    // Y-axes autoscale (independent per axis)
+
+    // --- Y-axes autoscale (independent per axis) ---
     for (size_t axisIdx = 0; axisIdx < yAxes_.size(); ++axisIdx) {
         if (!yAxes_[axisIdx].autoscale) continue;
-        
-        bool hasY = false;
-        double ylo = 1e30, yhi = -1e30;
-        
-        // Find all series using this axis
+
+        bool   hasY = false;
+        double ylo  = std::numeric_limits<double>::max();
+        double yhi  = std::numeric_limits<double>::lowest();
+
         for (const auto& s : series_) {
             if (s.yAxisIndex != static_cast<int>(axisIdx)) continue;
-            if (s.isBoolean) continue;  // Skip boolean series
-            if (s.ys.empty()) continue;
-            
-            for (double v : s.ys) {
-                if (v < ylo) ylo = v;
-                if (v > yhi) yhi = v;
+            if (s.isBoolean) continue;
+
+            for (const auto& cv : s.chunks) {
+                for (int64_t i = 0; i < cv.len; ++i) {
+                    const double v = static_cast<double>(cv.ys[i]);
+                    if (!std::isfinite(v)) continue;
+                    if (v < ylo) ylo = v;
+                    if (v > yhi) yhi = v;
+                    hasY = true;
+                }
             }
-            hasY = true;
         }
-        
+
         if (hasY) {
             double range = yhi - ylo;
-            if (range < 1e-12) { ylo -= 0.5; yhi += 0.5; range = 1.0; }
+            if (range < 1e-12) {
+                ylo -= 0.5;
+                yhi += 0.5;
+                range = 1.0;
+            }
             yAxes_[axisIdx].min = ylo - kPad * range;
             yAxes_[axisIdx].max = yhi + kPad * range;
         }
@@ -864,51 +920,116 @@ void LinePlot::UpdateBuffers()
     UpdateAxisBuffers();
 }
 
+std::pair<float, float> LinePlot::ComputeYRange(
+    const std::vector<ChunkView>& chunks,
+    float                         paddingFraction)
+{
+    double ylo = std::numeric_limits<double>::max();
+    double yhi = std::numeric_limits<double>::lowest();
+    bool   any = false;
+
+    auto accumulate = [&](double v)
+    {
+        if (!std::isfinite(v)) return;
+        if (v < ylo) ylo = v;
+        if (v > yhi) yhi = v;
+        any = true;
+    };
+    auto accumulateInt = [&](double v)
+    {
+        // Integer values are always finite — skip isfinite check
+        if (v < ylo) ylo = v;
+        if (v > yhi) yhi = v;
+        any = true;
+    };
+
+    for (const auto& cv : chunks)
+    {
+        for (int64_t i = 0; i < cv.len; ++i)
+            accumulate(static_cast<double>(cv.ys[i]));
+    }
+
+    if (!any) return { -1.0f, 1.0f };
+
+    if (ylo == yhi) { ylo -= 1.0; yhi += 1.0; }
+
+    double pad = (yhi - ylo) * paddingFraction;
+    return {
+        static_cast<float>(ylo - pad),
+        static_cast<float>(yhi + pad)
+    };
+}
+
 void LinePlot::UpdateSeriesBuffers()
 {
-    // Clear old buffers
-    for (auto& sb : seriesBuffers_) {
-        glDeleteVertexArrays(1, &sb.vao);
-        glDeleteBuffers(1, &sb.vbo);
+    size_t chunksNeeded = 0;
+    for (const auto& s : series_)
+        for (const auto& cv : s.chunks)
+            if (cv.len > 0) ++chunksNeeded;
+
+    while (seriesBuffers_.size() > chunksNeeded) {
+        seriesBuffers_.back().Free();
+        seriesBuffers_.pop_back();
     }
-    seriesBuffers_.clear();
-    
-    // Create new buffers for each series
-    for (const auto& series : series_) {
-        if (series.xs.empty() || series.ys.empty()) continue;
-        if (series.xs.size() != series.ys.size()) continue;
-        
-        SeriesBuffers sb;
-        sb.yAxisIndex = series.yAxisIndex;
-        
-        // Convert data coordinates to normalized device coordinates
-        std::vector<float> vertices;
-        
-        for (size_t i = 0; i < series.xs.size(); ++i) {
-            float sx, sy;
-            DataToScreen(series.xs[i], series.ys[i], series.yAxisIndex, sx, sy);
-            vertices.push_back(sx);
-            vertices.push_back(sy);
+
+    size_t bufIdx = 0;
+
+    for (const auto& s : series_) {
+        float yMin = 0.f, yMax = 1.f;
+        if (s.yAxisIndex >= 0 &&
+            s.yAxisIndex < static_cast<int>(yAxes_.size()))
+        {
+            yMin = static_cast<float>(yAxes_[s.yAxisIndex].min);
+            yMax = static_cast<float>(yAxes_[s.yAxisIndex].max);
         }
-        
-        sb.vertexCount = vertices.size() / 2;
-        
-        // Create VAO/VBO
-        glGenVertexArrays(1, &sb.vao);
-        glGenBuffers(1, &sb.vbo);
-        
-        glBindVertexArray(sb.vao);
-        glBindBuffer(GL_ARRAY_BUFFER, sb.vbo);
-        glBufferData(GL_ARRAY_BUFFER, vertices.size() * sizeof(float), vertices.data(), GL_STATIC_DRAW);
-        
-        glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 2 * sizeof(float), (void*)0);
-        glEnableVertexAttribArray(0);
-        
-        glBindVertexArray(0);
-        
-        seriesBuffers_.push_back(sb);
+
+        for (const auto& cv : s.chunks) {
+            if (cv.len == 0) continue;
+
+            const int64_t xOffset    = xMin_;
+            const GLsizei dataLen    = static_cast<GLsizei>(cv.len);
+            const GLsizei uploadLen  = dataLen + (cv.hasBridge ? 1 : 0);
+
+            if (bufIdx >= seriesBuffers_.size()) {
+                SeriesBuffers sb;
+                sb.Allocate(uploadLen * 2);
+                seriesBuffers_.push_back(std::move(sb));
+            }
+
+            auto& sb = seriesBuffers_[bufIdx++];
+            sb.EnsureCapacity(uploadLen);
+
+            // --- Timestamp scratch ---
+            sb.tScratch.resize(uploadLen);
+            int64_t dstOffset = 0;
+            if (cv.hasBridge) {
+                sb.tScratch[0] = static_cast<float>(cv.bridgeTime - xOffset);
+                dstOffset = 1;
+            }
+            for (int64_t i = 0; i < cv.len; ++i)
+                sb.tScratch[dstOffset + i] = static_cast<float>(cv.xs[i] - xOffset);
+
+            sb.UploadXs(uploadLen);
+
+            // --- Value upload ---
+            sb.UploadYs(
+                uploadLen,
+                cv.ys,
+                dataLen,
+                cv.hasBridge ? &cv.bridgeValue : nullptr);
+
+            // Metadata
+            sb.yAxisIndex = s.yAxisIndex;
+            sb.colour     = s.colour;
+            sb.isBoolean  = s.isBoolean;
+            sb.xMin       = 0.f;
+            sb.xMax       = static_cast<float>(xMax_ - xMin_);
+            sb.yMin       = yMin;
+            sb.yMax       = yMax;
+        }
     }
 }
+
 
 void LinePlot::UpdateGridBuffers()
 {
@@ -1178,43 +1299,50 @@ void LinePlot::RenderAxes()
     glBindVertexArray(0);
 }
 
-void LinePlot::RenderSeries() {
+void LinePlot::RenderSeries()
+{
     if (seriesBuffers_.empty()) return;
 
     glUseProgram(lineShader_);
 
-    // Enable line smoothing (optional, depending on your pipeline)
     glEnable(GL_LINE_SMOOTH);
     glEnable(GL_BLEND);
     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
 
-    for (size_t i = 0; i < seriesBuffers_.size(); ++i) {
-        const auto& sb = seriesBuffers_[i];
+    glLineWidth(1.0f);
+
+    for (const auto& sb : seriesBuffers_) {
         if (sb.vertexCount < 2) continue;
 
-        // Resolve the matching series metadata for color / style
-        const auto& series = series_[i];
+        // Use global X axis range
+        float xMin = 0.0f;
+        float xMax = static_cast<float>(xMax_ - xMin_);
 
-        // Set line color uniform
-        GLint colorLoc = glGetUniformLocation(lineShader_, "u_color");
-        glUniform4f(colorLoc,
-                    series.colour.r,
-                    series.colour.g,
-                    series.colour.b,
+        // Use per-axis Y range from yAxes_ (set by ApplyAutoscale)
+        float yMin = sb.yMin;
+        float yMax = sb.yMax;
+        if (sb.yAxisIndex < static_cast<int>(yAxes_.size())) {
+            yMin = static_cast<float>(yAxes_[sb.yAxisIndex].min);
+            yMax = static_cast<float>(yAxes_[sb.yAxisIndex].max);
+        }
+
+        glUniform1f(uniforms_.xMin,  xMin);
+        glUniform1f(uniforms_.xMax,  xMax);
+        glUniform1f(uniforms_.yMin,  yMin);
+        glUniform1f(uniforms_.yMax,  yMax);
+        glUniform4f(uniforms_.color,
+                    sb.colour.r,
+                    sb.colour.g,
+                    sb.colour.b,
                     1.0f);
 
-        // Set line width
-        glLineWidth(1.0f);
-
-        // Bind and draw
         glBindVertexArray(sb.vao);
-        glDrawArrays(GL_LINE_STRIP, 0, static_cast<GLsizei>(sb.vertexCount));
+        glDrawArrays(GL_LINE_STRIP, 0, sb.vertexCount);
         glBindVertexArray(0);
     }
 
     glDisable(GL_LINE_SMOOTH);
     glDisable(GL_BLEND);
-
     glUseProgram(0);
 }
 

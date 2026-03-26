@@ -50,6 +50,7 @@ extern "C" {
 
 /** Maximum simultaneous subscriptions a publisher can serve. */
 #define DBG_PUB_MAX_SUBSCRIPTIONS   DBG_MAX_SUBSCRIPTIONS
+#define DBG_SUB_ID_AUTO             UINT16_C(0xFFFF)
 
 /** Maximum fields per subscription. */
 #define DBG_PUB_MAX_SUB_FIELDS      DBG_MAX_SUB_FIELDS
@@ -529,6 +530,67 @@ dbg_status_t dbg_sub_unsubscribe(dbg_subscriber_t *sub,
 int dbg_sub_poll(dbg_subscriber_t *sub,
                  dbg_frame_cb_t    cb,
                  void             *user_ctx);
+/**
+ * @brief   Iterator for walking all values in a frame payload.
+ *
+ * Usage:
+ *   dbg_frame_iter_t it;
+ *   dbg_frame_iter_init(&it, payload, &layout);
+ *   dbg_value_t val;
+ *   while (dbg_frame_iter_next(&it, &val) == DBG_OK) {
+ *       // it.current_index, it.current_field_id, it.current_type, val
+ *   }
+ */
+typedef struct {
+    const uint8_t          *payload;
+    const dbg_sub_layout_t *layout;
+    uint16_t                current_index;
+    uint64_t                current_field_id;
+    dbg_value_type_t        current_type;
+} dbg_frame_iter_t;
+
+/**
+ * @brief   Holds a single received frame's metadata and a stable copy
+ *          of its payload, plus a ready-initialised field iterator.
+ *
+ * The caller owns this struct and must ensure it outlives any use of
+ * the embedded iterator.
+ */
+typedef struct {
+    uint16_t          sub_id;
+    uint32_t          sequence;
+    uint64_t          timestamp_us;
+    uint16_t          payload_size;
+    uint8_t           payload[DBG_MAX_FRAME_PAYLOAD]; /* stable copy */
+    dbg_frame_iter_t  iter;                           /* points into payload[] */
+} dbg_frame_result_t;
+
+/**
+ * @brief   Variant of dbg_sub_poll that returns an iterator over the
+ *          first valid frame received, rather than invoking a callback.
+ *
+ * Receives up to max_per_poll frames from the data socket, applies the
+ * same validation and sequence-tracking logic as dbg_sub_poll, and on
+ * the first accepted frame:
+ *   - copies the payload into @p result->payload (stable storage),
+ *   - initialises @p result->iter against that copy and @p layout,
+ *   - populates all metadata fields.
+ *
+ * Remaining frames in the socket buffer are intentionally left for the
+ * next call so that the caller can process one frame at a time.
+ *
+ * @param   sub     Subscriber handle.
+ * @param   layout  Layout describing field offsets/types; must remain
+ *                  valid for the lifetime of the returned iterator.
+ * @param   result  Caller-allocated output struct.
+ *
+ * @return  1  if a frame was received and @p result is populated.
+ *          0  if no frame was available.
+ *         <0  on error (dbg_status_t cast to int).
+ */
+int dbg_sub_poll_iter(dbg_subscriber_t  *sub,
+                      dbg_sub_layout_t  *layout,
+                      dbg_frame_result_t *result);
 
 /**
  * @brief   Send a write request to the server.
@@ -884,25 +946,6 @@ static inline int dbg_layout_find_field(
 /* ══════════════════════════════════════════════════════════════════════════
    SUBSCRIBER — FRAME ITERATOR
    ══════════════════════════════════════════════════════════════════════════ */
-
-/**
- * @brief   Iterator for walking all values in a frame payload.
- *
- * Usage:
- *   dbg_frame_iter_t it;
- *   dbg_frame_iter_init(&it, payload, &layout);
- *   dbg_value_t val;
- *   while (dbg_frame_iter_next(&it, &val) == DBG_OK) {
- *       // it.current_index, it.current_field_id, it.current_type, val
- *   }
- */
-typedef struct {
-    const uint8_t          *payload;
-    const dbg_sub_layout_t *layout;
-    uint16_t                current_index;
-    uint64_t                current_field_id;
-    dbg_value_type_t        current_type;
-} dbg_frame_iter_t;
 
 /**
  * @brief   Initialise a frame iterator.

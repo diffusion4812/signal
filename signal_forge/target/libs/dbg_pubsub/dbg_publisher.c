@@ -108,6 +108,7 @@ static pub_field_entry_t*  pub_find_field(dbg_publisher_t *pub, uint64_t field_i
 static pub_subscription_t* pub_find_sub(dbg_publisher_t *pub, uint16_t sub_id);
 static pub_subscription_t* pub_alloc_sub(dbg_publisher_t *pub);
 
+static uint16_t pub_alloc_sub_id(const dbg_publisher_t *pub);
 static void pub_handle_subscribe(dbg_publisher_t *pub,
                                  const uint8_t *data, uint32_t len,
                                  const dbg_addr_t *from);
@@ -398,6 +399,22 @@ int dbg_pub_poll_config(dbg_publisher_t *pub)
    SUBSCRIBE HANDLER
    ══════════════════════════════════════════════════════════════════════════ */
 
+    static uint16_t pub_alloc_sub_id(const dbg_publisher_t *pub)
+{
+    for (uint32_t candidate = 0; candidate < DBG_SUB_ID_AUTO; candidate++) {
+        int in_use = 0;
+        for (uint32_t i = 0; i < DBG_PUB_MAX_SUBSCRIPTIONS; i++) {
+            if (pub->subs[i].active &&
+                pub->subs[i].sub_id == (uint16_t)candidate) {
+                in_use = 1;
+                break;
+            }
+        }
+        if (!in_use) return (uint16_t)candidate;
+    }
+    return DBG_SUB_ID_AUTO; /* No free ID — caller must handle */
+}
+
 static void pub_handle_subscribe(dbg_publisher_t  *pub,
                                  const uint8_t    *data,
                                  uint32_t          len,
@@ -423,8 +440,26 @@ static void pub_handle_subscribe(dbg_publisher_t  *pub,
         return;
     }
 
+    /* ── Auto-assign subscription ID if requested ── */
+    uint16_t assigned_id = req->sub_id;
+
+    if (req->sub_id == DBG_SUB_ID_AUTO) {
+        assigned_id = pub_alloc_sub_id(pub);
+        if (assigned_id == DBG_SUB_ID_AUTO) {
+            /* No free ID slot available */
+            dbg_subscribe_ack_t ack;
+            memset(&ack, 0, sizeof(ack));
+            dbg_header_init(&ack.header, DBG_MSG_SUBSCRIBE_ACK,
+                            req->header.tx_id);
+            ack.sub_id = DBG_SUB_ID_AUTO;
+            ack.status = (int16_t)DBG_ERR_TOO_MANY_SUBS;
+            pub_send_config(pub, &ack, sizeof(ack), from);
+            return;
+        }
+    }
+
     /* Tear down any existing subscription with the same ID */
-    pub_subscription_t *existing = pub_find_sub(pub, req->sub_id);
+    pub_subscription_t *existing = pub_find_sub(pub, assigned_id);
     if (existing) {
         pub_teardown_sub(pub, existing);
     }
@@ -435,7 +470,7 @@ static void pub_handle_subscribe(dbg_publisher_t  *pub,
         dbg_subscribe_ack_t ack;
         memset(&ack, 0, sizeof(ack));
         dbg_header_init(&ack.header, DBG_MSG_SUBSCRIBE_ACK, req->header.tx_id);
-        ack.sub_id = req->sub_id;
+        ack.sub_id = assigned_id;
         ack.status = (int16_t)DBG_ERR_TOO_MANY_SUBS;
         pub_send_config(pub, &ack, sizeof(ack), from);
         return;
@@ -448,10 +483,10 @@ static void pub_handle_subscribe(dbg_publisher_t  *pub,
     dbg_subscribe_ack_t *ack = (dbg_subscribe_ack_t *)pub->tx_buf;
     memset(ack, 0, ack_size);
     dbg_header_init(&ack->header, DBG_MSG_SUBSCRIBE_ACK, req->header.tx_id);
-    ack->sub_id      = req->sub_id;
+    ack->sub_id      = assigned_id;
     ack->field_count = field_count;
 
-    sub->sub_id            = req->sub_id;
+    sub->sub_id            = assigned_id;
     sub->interval_us       = req->interval_us;
     sub->sequence          = 0;
     sub->last_heartbeat_us = dbg_get_time_us();

@@ -39,9 +39,8 @@ namespace signal_stream {
                                  std::chrono::nanoseconds now_ns) {
             auto delta = now_ns - start_ns;
             double seconds = std::chrono::duration<double>(delta).count();
-            double frequency = 0.05;
-            double value = p1d[idx].fractalNoise(seconds * frequency) * 2.0;
-            double raw_noise = p1d[idx].noise(seconds);
+            double frequency = 0.1;
+            double value = p1d[idx].fractalNoise(seconds * frequency) * 100.0;
 
             switch (datum.type()) {
                 case avro::AVRO_DOUBLE:
@@ -51,14 +50,14 @@ namespace signal_stream {
                     datum.value<float>() = static_cast<float>(value);
                     break;
                 case avro::AVRO_INT:
-                    datum.value<int32_t>() = static_cast<int32_t>(raw_noise);
+                    datum.value<int32_t>() = static_cast<int32_t>(value);
                     break;
                 case avro::AVRO_LONG:
-                    datum.value<int64_t>() = static_cast<int64_t>(raw_noise);
+                    datum.value<int64_t>() = static_cast<int64_t>(value);
                     break;
                 case avro::AVRO_STRING:
                     datum.value<std::string>() =
-                        "val_" + std::to_string(raw_noise);
+                        "val_" + std::to_string(value);
                     break;
                 case avro::AVRO_RECORD:
                     populateRandomRecord(
