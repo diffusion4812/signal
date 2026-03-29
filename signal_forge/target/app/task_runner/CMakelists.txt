@@ -1,0 +1,22 @@
+find_package(Threads REQUIRED)
+
+add_compile_definitions(_GNU_SOURCE)
+
+add_executable(signal_forge_task_runner
+    src/task_runner.c
+    src/framework_runner.c
+)
+
+target_include_directories(signal_forge_task_runner
+    PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/src
+)
+
+target_link_libraries(signal_forge_task_runner
+PRIVATE
+    task_host_core
+    signal_forge_target
+    dbg_pubsub
+    pthread
+    rt
+)

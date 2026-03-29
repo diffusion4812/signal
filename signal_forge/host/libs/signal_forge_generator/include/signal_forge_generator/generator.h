@@ -73,6 +73,7 @@ private:
     /// Emits PinInfo / FieldInfo tables for all nodes (pins + static fields).
     void emit_pin_info             (std::ostringstream& out);
 
+    void emit_task_entry           (std::ostringstream& out);
     void emit_block_registry       (std::ostringstream& out);
     void emit_inline_structs       (std::ostringstream& out); // slot accessors
 
@@ -83,7 +84,7 @@ private:
     ///     the host communication layer to force or release inject values
     void emit_debug_interface      (std::ostringstream& out);
 
-    void emit_task_entry           (std::ostringstream& out,
+    void emit_compute              (std::ostringstream& out,
                                     const std::vector<ResolvedLink>& resolved,
                                     const std::vector<const Node*>&  order);
 

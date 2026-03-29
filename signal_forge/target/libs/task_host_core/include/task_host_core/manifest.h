@@ -56,7 +56,7 @@ typedef enum {
 
     /* ── Sentinel ─────────────────────────────────────────────────────────── */
     FIELD_TYPE_COUNT               /* Total number of type codes (not a valid type) */
-} FieldType;
+} field_type_t;
 
 /* ─────────────────────────────────────────────────────────────────────────────
  * Field category — distinguishes pin fields from static (internal state) fields
@@ -89,13 +89,13 @@ typedef enum {
  * FieldInfo — metadata for one field (pin or static) inside a block struct
  * ───────────────────────────────────────────────────────────────────────────── */
 typedef struct {
-    uint64_t    field_id;   /* Stable project/GUI ID                              */
-    const char* instance;   /* Instance name of the block in the graph            */
-    const char* name;       /* Symbol name of the field in the C struct           */
-    uint32_t    flags;      /* FIELD_CAT_* | FIELD_DIR_* or FIELD_ACCESS_*        */
-    FieldType   type;       /* IEC 61131-3 datatype of the field                  */
-    uint64_t    size;       /* sizeof the field in bytes                          */
-    uint64_t    offset;     /* offsetof the field in the block struct             */
+    uint64_t     field_id;   /* Stable project/GUI ID                              */
+    const char*  instance;   /* Instance name of the block in the graph            */
+    const char*  name;       /* Symbol name of the field in the C struct           */
+    uint32_t     flags;      /* FIELD_CAT_* | FIELD_DIR_* or FIELD_ACCESS_*        */
+    field_type_t type;       /* IEC 61131-3 datatype of the field                  */
+    uint64_t     size;       /* sizeof the field in bytes                          */
+    uint64_t     offset;     /* offsetof the field in the block struct             */
 } FieldInfo;
 
 /* ─────────────────────────────────────────────────────────────────────────────
@@ -108,14 +108,14 @@ typedef struct {
  *   field     : unquoted field name in struct_t
  * ───────────────────────────────────────────────────────────────────────────── */
 #define FIELD_ENTRY(struct_t, id, dir, iec_type, instance, field) \
-    {                                                   \
-        (uint64_t)(id),                                 \
-        #instance,                                       \
-        #field,                                         \
-        (uint32_t)(FIELD_CAT_PIN | (dir)),              \
-        (FieldType)(iec_type),                          \
-        (uint64_t)sizeof(((struct_t*)0)->field),        \
-        (uint64_t)offsetof(struct_t, field)             \
+    {                                                             \
+        (uint64_t)(id),                                           \
+        #instance,                                                \
+        #field,                                                   \
+        (uint32_t)(FIELD_CAT_PIN | (dir)),                        \
+        (field_type_t)(iec_type),                                 \
+        (uint64_t)sizeof(((struct_t*)0)->field),                  \
+        (uint64_t)offsetof(struct_t, field)                       \
     }
 
 /* ─────────────────────────────────────────────────────────────────────────────
@@ -128,27 +128,28 @@ typedef struct {
  *   field     : unquoted field name in struct_t
  * ───────────────────────────────────────────────────────────────────────────── */
 #define STATIC_ENTRY(struct_t, id, access, iec_type, instance, field) \
-    {                                                   \
-        (uint64_t)(id),                                 \
-        #instance,                                       \
-        #field,                                         \
-        (uint32_t)(FIELD_CAT_STATIC | (access)),        \
-        (FieldType)(iec_type),                          \
-        (uint64_t)sizeof(((struct_t*)0)->field),        \
-        (uint64_t)offsetof(struct_t, field)             \
+    {                                                                 \
+        (uint64_t)(id),                                               \
+        #instance,                                                    \
+        #field,                                                       \
+        (uint32_t)(FIELD_CAT_STATIC | (access)),                      \
+        (field_type_t)(iec_type),                                     \
+        (uint64_t)sizeof(((struct_t*)0)->field),                      \
+        (uint64_t)offsetof(struct_t, field)                           \
     }
 
 /* ─────────────────────────────────────────────────────────────────────────────
  * BlockRegistryEntry — one entry per block instance in the generated task
  * ───────────────────────────────────────────────────────────────────────────── */
+
 typedef struct {
     uint64_t         block_id;       /* Stable project/GUI ID                    */
     const char*      block_name;     /* Block type name (e.g. "sf_pid")          */
     const char*      instance_name;  /* Instance name   (e.g. "speed_pid")       */
-    uint64_t         signature;      /* Layout fingerprint — must match manifest */
+    uint64_t         block_sig;      /* Layout fingerprint — must match manifest */
     uint64_t         block_size;     /* sizeof the block struct                  */
     uint64_t         field_count;    /* Total entries in the fields array        */
     const FieldInfo* fields;         /* Pins + statics in declaration order      */
-} BlockRegistryEntry;
+} block_reg_entry_t;
 
 #endif /* MANIFEST_H */

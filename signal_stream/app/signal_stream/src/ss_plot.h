@@ -122,6 +122,7 @@ private:
     // ----------------------------------------------------------------
     wxBoxSizer* plot_sizer_;
     LinePlot*   plot_;
+    int64_t xSeconds_;
 
     // ----------------------------------------------------------------
     // Internal helpers
@@ -131,10 +132,11 @@ private:
         const std::shared_ptr<arrow::Schema>& schema);
 
     bool FillSeriesFromBatches(
-        PlotSeries&                                          ps,
+        PlotSeries& ps,
         const std::vector<std::shared_ptr<arrow::RecordBatch>>& batches,
-        int                                                  ts_idx,
-        int                                                  col_idx);
+        int ts_idx,
+        int col_idx,
+        int64_t windowCutoff);
 
     void OnTimer(wxTimerEvent& event);
 

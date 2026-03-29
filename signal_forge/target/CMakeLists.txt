@@ -10,5 +10,7 @@ include(cmake/Dependencies.cmake)
 
 add_subdirectory(libs/dbg_pubsub)
 add_subdirectory(libs/task_host_core)
-add_subdirectory(app/task_host)
+add_subdirectory(libs/signal_forge_target)
+add_subdirectory(app/signal_forge)
+add_subdirectory(app/task_runner)
 add_subdirectory(test/sub)

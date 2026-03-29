@@ -78,7 +78,8 @@ Generator::Result Generator::generate() {
     emit_block_registry       (out);
     emit_inline_structs       (out);   // S_<instance>(ctx) accessors for all nodes
     //emit_debug_interface      (out);   // debug map + inject message handler
-    emit_task_entry           (out, resolved, order);
+    emit_compute              (out, resolved, order);
+    emit_task_entry           (out);
 
     Result r;
     r.c_source = out.str();
@@ -238,6 +239,7 @@ std::vector<const Node*> Generator::topological_order_from_resolved(
 
 void Generator::emit_task_host_core_header(std::ostringstream& out) {
     out << "#include \"task_host_core/interface.h\"\n"
+        << "#include \"task_host_core/task_entry.h\"\n"
         << "#include \"task_host_core/manifest.h\"\n\n";
 }
 
@@ -407,13 +409,25 @@ void Generator::emit_pin_info(std::ostringstream& out) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// emit_task_entry
+// ─────────────────────────────────────────────────────────────────────────────
+void Generator::emit_task_entry(std::ostringstream& out) {
+    out << "const task_entry_t task_entry = {\n"
+        << "    .init            = NULL,\n"
+        << "    .compute         = task_compute,\n"
+        << "    .shutdown        = NULL,\n"
+        << "    .on_error        = NULL,\n"
+        << "    .reg             = task_registry\n"
+        << "};\n\n";
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // emit_block_registry — all nodes
 // ─────────────────────────────────────────────────────────────────────────────
-
 void Generator::emit_block_registry(std::ostringstream& out) {
     const int total = (int)graph_.Nodes().size();
 
-    out << "static const BlockRegistryEntry TASK_BLOCK_REGISTRY[]";
+    out << "static const block_reg_entry_t TASK_BLOCK_REGISTRY[]";
     if (total == 0) {
         out << ";\n\n";
     } else {
@@ -424,19 +438,19 @@ void Generator::emit_block_registry(std::ostringstream& out) {
 
             const std::string& slot = slot_name_by_nodeid_.at(n->id);
             out << "    {\n"
-                << "        .block_id   = " << n->id          << ",\n"
-                << "        .block_name = \"" << n->type      << "\",\n"
-                << "        .signature  = " << slot           << "_SIG,\n"
-                << "        .block_size = sizeof("  << tmpl->struct_name << "),\n"
-                << "        .field_count = (uint64_t)(sizeof(" << slot << "_FIELDS)"
-                                          << " / sizeof(" << slot << "_FIELDS[0])),\n"
-                << "        .fields     = " << slot << "_FIELDS\n"
+                << "        .block_id          = " << n->id          << ",\n"
+                << "        .block_name        = \"" << n->type      << "\",\n"
+                << "        .block_sig         = " << slot           << "_SIG,\n"
+                << "        .block_size        = sizeof("  << tmpl->struct_name << "),\n"
+                << "        .field_count       = (uint64_t)(sizeof(" << slot << "_FIELDS)"
+                                              << " / sizeof(" << slot << "_FIELDS[0])),\n"
+                << "        .fields            = " << slot << "_FIELDS\n"
                 << "    },\n";
         }
         out << "};\n\n";
     }
 
-    out << "const BlockRegistryEntry* task_registry(uint64_t *count) {\n"
+    out << "const block_reg_entry_t* task_registry(uint64_t *count) {\n"
         << "    if (count) {\n";
     if (total == 0)
         out << "        *count = 0;\n";
@@ -458,7 +472,7 @@ void Generator::emit_inline_structs(std::ostringstream& out) {
         const std::string& slot = slot_name_by_nodeid_.at(n->id);
 
         out << "static inline " << sname << "* S_" << n->instance
-            << "(TaskContext *ctx) {\n"
+            << "(task_slot_ctx_t *ctx) {\n"
             << "    return (" << sname << "*)ctx->slots[" << slot << "];\n"
             << "}\n\n";
     }
@@ -474,11 +488,11 @@ void Generator::emit_inline_structs(std::ostringstream& out) {
 //       across all probe and inject nodes.  The host communication layer can
 //       locate this symbol by name and dereference its members directly.
 //
-//  2. sf_debug_map_init(TaskContext*)
+//  2. sf_debug_map_init(task_context_t*)
 //       Must be called once at startup (after ctx->slots are allocated).
 //       Fills every pointer in sf_debug_map from the live slot memory.
 //
-//  3. sf_inject_msg_t / sf_handle_inject_msg(TaskContext*, const sf_inject_msg_t*)
+//  3. sf_inject_msg_t / sf_handle_inject_msg(task_context_t*, const sf_inject_msg_t*)
 //       Tiny message handler called by the host communication layer whenever
 //       the host wants to update an inject block's force_enable or forced_value.
 //       The host sends {slot_id, field_id, value} where:
@@ -511,7 +525,7 @@ void Generator::emit_debug_interface(std::ostringstream& out) {
         << "static sf_debug_map_t sf_debug_map;\n\n";
 
     // ── 2. sf_debug_map_init ─────────────────────────────────────────────────
-    out << "void sf_debug_map_init(TaskContext *ctx) {\n";
+    out << "void sf_debug_map_init(task_context_t *ctx) {\n";
     for (const Node* n : probe_nodes) {
         const std::string& slot = slot_name_by_nodeid_.at(n->id);
         out << "    sf_debug_map.probe_" << n->instance << "_value"
@@ -538,7 +552,7 @@ void Generator::emit_debug_interface(std::ostringstream& out) {
             "    uint32_t field_id;\n"
             "    float    value;\n"
             "} sf_inject_msg_t;\n\n"
-            "void sf_handle_inject_msg(TaskContext *ctx, const sf_inject_msg_t *msg) {\n"
+            "void sf_handle_inject_msg(task_context_t *ctx, const sf_inject_msg_t *msg) {\n"
             "    switch (msg->slot_id) {\n";
 
         for (const Node* n : inject_nodes) {
@@ -566,11 +580,11 @@ void Generator::emit_debug_interface(std::ostringstream& out) {
 //  Wiring         → resolved link assignments for all node types
 // ─────────────────────────────────────────────────────────────────────────────
 
-void Generator::emit_task_entry(std::ostringstream& out,
+void Generator::emit_compute(std::ostringstream& out,
                                  const std::vector<ResolvedLink>& resolved,
                                  const std::vector<const Node*>&  order)
 {
-    out << "void task_entry(TaskContext *ctx) {\n";
+    out << "task_result_t task_compute(task_slot_ctx_t *ctx) {\n";
 
     // ── 1. Typed local pointers for every node ────────────────────────────────
     for (const Node* n : order) {
@@ -595,7 +609,7 @@ void Generator::emit_task_entry(std::ostringstream& out,
             << " = "  << rl.src_instance << "->" << rl.src_pin_name << ";\n";
     }
 
-    out << "}\n";
+    out << "}\n\n";
 }
 
 } // namespace signal_forge

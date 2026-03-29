@@ -25,14 +25,13 @@
 #define BUFFER_SIZE 1024
 #define MAX_SLOTS   1024
 
-typedef BlockRegistryEntry* (*task_reg_t)(uint64_t*);
 typedef void                (*task_entry_t)(TaskContext*);
 typedef void                (*task_init_t)(TaskContext*);
 typedef int                 (*migrate_func_t)(uint32_t, void*, void*);
 
 typedef struct {
     uint64_t allocated_slots;
-    BlockRegistryEntry* reg;
+    block_reg_entry_t* reg;
     TaskContext ctx;
     pthread_mutex_t ctx_lock;
     task_entry_t func;
@@ -49,7 +48,7 @@ static int64_t find_existing_slot_index(const Task* task, uint64_t block_id) {
     return -1;
 }
 
-static inline dbg_value_type_t dbg_value_type_from_field_type(FieldType ft)
+static inline dbg_value_type_t dbg_value_type_from_field_type(field_type_t ft)
 {
     switch (ft) {
     case FIELD_TYPE_REAL: return DBG_VT_F32;
@@ -101,10 +100,10 @@ void hot_swap(Task *task, const char *so_path) {
     }
 
     uint64_t new_task_slots = 0;
-    BlockRegistryEntry* new_reg = new_task_reg(&new_task_slots);
+    block_reg_entry_t* new_reg = new_task_reg(&new_task_slots);
 
     // Build new registry and slot context arrays based on the new library
-    BlockRegistryEntry* new_reg_copy = calloc(MAX_SLOTS, sizeof(BlockRegistryEntry));
+    block_reg_entry_t* new_reg_copy = calloc(MAX_SLOTS, sizeof(block_reg_entry_t));
     void** new_ctx_slots = calloc(MAX_SLOTS, sizeof(void*));
     if (!new_reg_copy || !new_ctx_slots) {
         fprintf(stderr, "Allocation failure during hot swap\n");
@@ -125,16 +124,16 @@ void hot_swap(Task *task, const char *so_path) {
     }
 
     for (uint64_t n = 0; n < new_task_slots; n++) {
-        BlockRegistryEntry* new_block = &new_reg[n];
+        block_reg_entry_t* new_block = &new_reg[n];
 
         int64_t exist_idx = find_existing_slot_index(task, new_block->block_id);
         if (exist_idx >= 0) {
-            BlockRegistryEntry* existing_block = &task->reg[exist_idx];
+            block_reg_entry_t* existing_block = &task->reg[exist_idx];
             void* existing_ctx = task->ctx.slots[exist_idx];
 
             if (new_block->signature == existing_block->signature) {
                 // Preserve state; update metadata to new registry
-                memcpy(&new_reg_copy[n], new_block, sizeof(BlockRegistryEntry));
+                memcpy(&new_reg_copy[n], new_block, sizeof(block_reg_entry_t));
                 new_ctx_slots[n] = existing_ctx;
                 old_ctx_preserved[exist_idx] = 1;
                 printf("Block ID %ld: Signature match. Preserving state.\n", new_block->block_id);
@@ -164,7 +163,7 @@ void hot_swap(Task *task, const char *so_path) {
                 }
 
                 // Update registry entry and slot context
-                memcpy(&new_reg_copy[n], new_block, sizeof(BlockRegistryEntry));
+                memcpy(&new_reg_copy[n], new_block, sizeof(block_reg_entry_t));
                 new_ctx_slots[n] = new_block_context;
                 // Old context will be freed after we finish building new arrays
                 old_ctx_preserved[exist_idx] = 0;
@@ -191,7 +190,7 @@ void hot_swap(Task *task, const char *so_path) {
                 return;
             }
 
-            memcpy(&new_reg_copy[n], new_block, sizeof(BlockRegistryEntry));
+            memcpy(&new_reg_copy[n], new_block, sizeof(block_reg_entry_t));
             new_ctx_slots[n] = new_block_context;
         }
     }
@@ -327,79 +326,6 @@ void *client_handler(void *arg)
         }
     }
 
-    ///* Binary DebugRequest path */
-    //if ((size_t)bytes_read < sizeof(DebugRequest)) {
-    //    pthread_mutex_unlock(&g_task.ctx_lock);
-    //    close(client_fd);
-    //    return NULL;
-    //}
-//
-    //{
-    //    DebugRequest req;
-    //    memcpy(&req, buffer, sizeof(req));
-//
-    //    uint64_t found_slot = (uint64_t)-1;
-    //    const FieldInfo *field_info = NULL;
-//
-    //    for (uint64_t s = 0; s < g_task.allocated_slots; s++) {
-    //        if (g_task.reg[s].field_count == 0 || g_task.reg[s].fields == NULL) continue;
-//
-    //        for (uint64_t p = 0; p < g_task.reg[s].field_count; p++) {
-    //            if (g_task.reg[s].fields[p].field_id == req.field_id) {
-    //                found_slot = s;
-    //                field_info = &g_task.reg[s].fields[p];
-    //                break;
-    //            }
-    //        }
-    //        if (field_info) break;
-    //    }
-//
-    //    if (field_info && found_slot != (uint64_t)-1 && g_task.ctx.slots[found_slot]) {
-    //        char *base = (char *)g_task.ctx.slots[found_slot] + field_info->offset;
-//
-    //        /* Bounds check: ensure the field fits in the slot block */
-    //        if ((size_t)field_info->offset + sizeof(float) <= g_task.reg[found_slot].block_size) {
-//
-    //            /* WRITE */
-    //            if (req.op == DBG_OP_WRITE) {
-//
-    //                if (req.value_type != DBG_VT_F32 || req.value_len != sizeof(float)) {
-    //                    fprintf(stderr, "Type mismatch for field_id=%llu\n",
-    //                            (unsigned long long)req.field_id);
-    //                    goto reply_read; /* still reply with current value */
-    //                }
-//
-    //                *(float *)base = req.value.f32;
-    //            }
-//
-    //    reply_read:
-    //            /* READ (always return current value) */
-    //            {
-    //                float value = *(float *)base;
-//
-    //                DebugReply reply;
-    //                memset(&reply, 0, sizeof(reply));
-    //                reply.tx_id      = req.tx_id;
-    //                reply.version    = req.version;
-    //                reply.field_id   = field_info->field_id;
-    //                reply.value_type = DBG_VT_F32;
-    //                reply.value.f32  = value;
-//
-    //                (void)send_all(client_fd, &reply, sizeof(reply));
-    //            }
-//
-    //        } else {
-    //            fprintf(stderr,
-    //                    "Bounds error: slot=%lu field_id=%llu offset=%lu block_size=%lu\n",
-    //                    (unsigned long)found_slot,
-    //                    (unsigned long long)field_info->field_id,
-    //                    (unsigned long)field_info->offset,
-    //                    (unsigned long)g_task.reg[found_slot].block_size);
-    //        }
-    //    }
-
-    //}
-
     pthread_mutex_unlock(&g_task.ctx_lock);
     close(client_fd);
     return NULL;
@@ -443,7 +369,7 @@ int main() {
     pthread_detach(server_thread);
 
     g_task.allocated_slots = 0;
-    g_task.reg =       calloc(MAX_SLOTS, sizeof(BlockRegistryEntry));
+    g_task.reg =       calloc(MAX_SLOTS, sizeof(block_reg_entry_t));
     g_task.ctx.slots = calloc(MAX_SLOTS, sizeof(void*));
     pthread_mutex_init(&g_task.ctx_lock, NULL);
     g_task.func = NULL;

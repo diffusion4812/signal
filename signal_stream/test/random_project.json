@@ -7,22 +7,22 @@
       "signals": [
         {
           "name": "test_signal_001",
-          "type": "float64",
+          "type": "float32",
           "unit": ""
         },
         {
           "name": "test_signal_002",
-          "type": "float64",
+          "type": "float32",
           "unit": ""
         },
         {
           "name": "test_signal_003",
-          "type": "float64",
+          "type": "float32",
           "unit": ""
         },
         {
           "name": "test_signal_004",
-          "type": "float64",
+          "type": "float32",
           "unit": ""
         },
         {

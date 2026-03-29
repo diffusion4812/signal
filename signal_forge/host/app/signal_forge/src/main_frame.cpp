@@ -5,6 +5,7 @@
 #include "app.h"
 #include "main_frame.h"
 #include "graph_serialization.h"
+#include "sf_protocol_client.h"
 
 #include "task_host_core/interface.h"
 #include "task_host_core/manifest.h"
@@ -179,41 +180,163 @@ void MainFrame::OnCompile(wxCommandEvent& WXUNUSED(evt)) {
 
 void MainFrame::OnTransfer(wxCommandEvent& WXUNUSED(evt)) {
     const std::string compiled_file = wxGetApp().get_compiled_filename();
-    if (!compiled_file.length()) {
+    if (compiled_file.empty()) {
         logger_->info("Nothing to transfer...");
         return;
     }
-    logger_->info("Starting transfer...");
 
-    std::string putty_scp_path = wxGetApp().get_config().putty_scp.string();
-    std::string command = "\"" + putty_scp_path + "\" -batch -q ";
-    command += "-pw \"password\" \"" + compiled_file +"\" ";
-    command += "loar02@127.0.0.1:\"/mnt/c/Users/LOAR02/Source/signal/signal_forge/target/build/app/task_host\"";
+    // ── Read the .so file ─────────────────────────────────────────
+    std::ifstream file(compiled_file, std::ios::binary | std::ios::ate);
+    if (!file.is_open()) {
+        logger_->error("Cannot open file: {}", compiled_file);
+        return;
+    }
 
-    auto* process = new ExternalProcess(logger_,
-        [compiled_file](int status, std::shared_ptr<spdlog::logger> lg) {
-            if (status == 0) {
-                lg->info("Transfer successful! Connecting to task host...");
-                wxSocketClient socket;
-                wxIPV4address addr;
-                addr.Hostname("127.0.0.1");
-                addr.Service(9000);
-                if (socket.Connect(addr, true)) {
-                    socket.Write(std::string("./" + compiled_file).c_str(), compiled_file.length() + 2);
-                    lg->info("Successfully signaled task host");
-                } else {
-                    lg->error("Transfer succeeded, but could not connect to task host on port 9000");
-                }
-            } else {
-                lg->error("PSCP transfer failed with exit code {}", status);
+    const std::streamsize file_size = file.tellg();
+    file.seekg(0, std::ios::beg);
+
+    std::vector<uint8_t> file_data(static_cast<size_t>(file_size));
+    if (!file.read(reinterpret_cast<char*>(file_data.data()), file_size)) {
+        logger_->error("Failed to read file: {}", compiled_file);
+        return;
+    }
+    file.close();
+
+    logger_->info("Starting transfer: {} ({} bytes)",
+                  compiled_file, file_size);
+
+    // ── Compute CRC-32 of the file ────────────────────────────────
+    const uint32_t file_crc = SfProtocolClient::crc32(
+        file_data.data(), file_data.size());
+
+    logger_->info("File CRC-32: 0x{:08X}", file_crc);
+
+    // ── Run transfer on a worker thread — never block the UI ──────
+    std::shared_ptr<spdlog::logger> logger  = logger_;
+    int   slot    = 0;//wxGetApp().get_target_slot();    // which task slot to swap //TODO: Allow multiple tasks
+    const std::string host     = "127.0.0.1";//wxGetApp().get_target_host();
+    const uint16_t    port     = 7600;//wxGetApp().get_target_port();
+    const std::string filename = std::filesystem::path(compiled_file)
+                                     .filename().string();
+
+    std::thread([=, data = std::move(file_data)]() mutable {
+
+        SfProtocolClient client(logger);
+
+        // ── Connect ───────────────────────────────────────────────
+        if (!client.connect(host, port)) {
+            logger->error("Transfer failed: cannot connect to "
+                          "{}:{}", host, port);
+            return;
+        }
+
+        std::string error;
+
+        // ── SF_CMD_TRANSFER_BEGIN ─────────────────────────────────
+        sf_transfer_begin_t begin{};
+        strncpy(begin.filename, filename.c_str(),
+                sizeof(begin.filename) - 1);
+        begin.target_slot = static_cast<uint8_t>(slot);
+        begin.total_size  = static_cast<uint32_t>(data.size());
+        begin.crc32       = file_crc;
+
+        logger->info("[transfer] → TRANSFER_BEGIN  file={}  "
+                     "size={}  slot={}  crc=0x{:08X}",
+                     filename, data.size(), slot, file_crc);
+
+        if (!client.send_packet(SF_CMD_TRANSFER_BEGIN,
+                                &begin, sizeof(begin))) {
+            logger->error("[transfer] failed to send TRANSFER_BEGIN");
+            return;
+        }
+
+        if (!client.wait_ack(SF_CMD_TRANSFER_ACK,
+                             SF_CMD_TRANSFER_NACK, error)) {
+            logger->error("[transfer] TRANSFER_BEGIN rejected: {}", error);
+            return;
+        }
+
+        // ── SF_CMD_TRANSFER_CHUNK — send file in chunks ───────────
+        constexpr size_t CHUNK_SIZE = SF_MAX_CHUNK_SIZE;
+        size_t           offset     = 0;
+        size_t           chunk_num  = 0;
+        size_t           total_chunks =
+            (data.size() + CHUNK_SIZE - 1) / CHUNK_SIZE;
+
+        while (offset < data.size()) {
+            size_t this_chunk = std::min(CHUNK_SIZE,
+                                          data.size() - offset);
+
+            // Build chunk packet — header fields + inline data
+            // We send header and data separately to avoid copying
+            // into the fixed-size sf_transfer_chunk_t::data array
+            sf_transfer_chunk_t chunk{};
+            chunk.offset = static_cast<uint32_t>(offset);
+            chunk.length = static_cast<uint16_t>(this_chunk);
+
+            // Send header part of the chunk struct
+            // then the data slice directly from the file buffer.
+            // Use a single allocation to keep it one send call.
+            const size_t chunk_payload_size =
+                offsetof(sf_transfer_chunk_t, data) + this_chunk;
+
+            std::vector<uint8_t> chunk_payload(chunk_payload_size);
+            memcpy(chunk_payload.data(), &chunk,
+                   offsetof(sf_transfer_chunk_t, data));
+            memcpy(chunk_payload.data() +
+                   offsetof(sf_transfer_chunk_t, data),
+                   data.data() + offset, this_chunk);
+
+            if (!client.send_packet(SF_CMD_TRANSFER_CHUNK,
+                                    chunk_payload.data(),
+                                    static_cast<uint32_t>(
+                                        chunk_payload_size))) {
+                logger->error("[transfer] failed to send chunk {} of {}",
+                              chunk_num + 1, total_chunks);
+                return;
+            }
+
+            if (!client.wait_ack(SF_CMD_TRANSFER_ACK,
+                                 SF_CMD_TRANSFER_NACK, error)) {
+                logger->error("[transfer] chunk {} rejected: {}",
+                              chunk_num + 1, error);
+                return;
+            }
+
+            offset    += this_chunk;
+            chunk_num++;
+
+            // Progress log every 10% 
+            if (total_chunks >= 10 &&
+                chunk_num % (total_chunks / 10) == 0) {
+                logger->info("[transfer] {}% ({}/{}  bytes={}/{})",
+                             (chunk_num * 100) / total_chunks,
+                             chunk_num, total_chunks,
+                             offset, data.size());
             }
         }
-    );
 
-    if (wxExecute(command, wxEXEC_ASYNC, process) == 0) {
-        logger_->error("Failed to launch PSCP");
-        delete process;
-    }
+        // ── SF_CMD_TRANSFER_END ───────────────────────────────────
+        logger->info("[transfer] → TRANSFER_END");
+
+        if (!client.send_packet(SF_CMD_TRANSFER_END)) {
+            logger->error("[transfer] failed to send TRANSFER_END");
+            return;
+        }
+
+        if (!client.wait_ack(SF_CMD_TRANSFER_ACK,
+                             SF_CMD_TRANSFER_NACK, error)) {
+            logger->error("[transfer] TRANSFER_END rejected: {}", error);
+            return;
+        }
+
+        logger->info("[transfer] complete — {} bytes transferred, "
+                     "CRC verified, slot {} will swap",
+                     data.size(), slot);
+
+        client.disconnect();
+
+    }).detach();   // detach — progress is reported via logger
 }
 
 void MainFrame::OnGoOnline(wxCommandEvent& WXUNUSED(evt))
@@ -544,7 +667,7 @@ bool MainFrame::CheckOrMakeConnection(wxSocketClient* socket_client) {
     if (!socket_client->IsConnected()) {
         wxIPV4address addr;
         addr.Hostname("127.0.0.1");
-        addr.Service(9000);
+        addr.Service(7600);
 
         // Attempt to connect
         socket_client->Connect(addr, false);

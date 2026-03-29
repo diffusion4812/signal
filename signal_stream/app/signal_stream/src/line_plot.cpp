@@ -173,22 +173,35 @@ void main() {
 }
 )";
 
-static const char* lineShader = R"(
-#version 330 core
+static const char* seriesShader = R"(
+// Vertex shader
+layout(location = 0) in float aX;   // data-space x (relative float32)
+layout(location = 1) in float aY;   // data-space y (float32)
 
-layout (location = 0) in float aTime;    // raw timestamp (float or double)
-layout (location = 1) in float aValue;   // raw signal value
+uniform mat4 uProjection;           // same screen-space ortho matrix as axis shader
 
 uniform float uXMin;
 uniform float uXMax;
 uniform float uYMin;
 uniform float uYMax;
 
-void main() {
-    // Map data coordinates → NDC [-1, 1]
-    float nx = (aTime  - uXMin) / (uXMax - uXMin) * 2.0 - 1.0;
-    float ny = (aValue - uYMin) / (uYMax - uYMin) * 2.0 - 1.0;
-    gl_Position = vec4(nx, ny, 0.0, 1.0);
+uniform float uScrLeft;
+uniform float uScrRight;
+uniform float uScrTop;
+uniform float uScrBottom;
+
+void main()
+{
+    // Normalise data to [0, 1]
+    float nx = (aX - uXMin) / (uXMax - uXMin);
+    float ny = (aY - uYMin) / (uYMax - uYMin);
+
+    // Map to screen space — same coordinate system as axis vertices
+    float sx = uScrLeft   + nx * (uScrRight  - uScrLeft);
+    float sy = uScrBottom + ny * (uScrTop    - uScrBottom);
+
+    // Projection handles screen → NDC
+    gl_Position = uProjection * vec4(sx, sy, 0.0, 1.0);
 }
 )";
 
@@ -212,6 +225,7 @@ wxBEGIN_EVENT_TABLE(LinePlot, wxGLCanvas)
     EVT_SIZE(LinePlot::OnResize)
     EVT_MOTION(LinePlot::OnMouseMotion)
     EVT_SYS_COLOUR_CHANGED(LinePlot::OnSysColourChanged)
+    EVT_MOUSEWHEEL(LinePlot::OnMouseWheel)
 wxEND_EVENT_TABLE()
 
 // ---------------------------------------------------------------------------
@@ -234,7 +248,7 @@ LinePlot::LinePlot(wxWindow* parent)
       legendPos_(LegendPosition::TopRight),
       marginLeft_(0), marginRight_(0), marginTop_(0), marginBottom_(0),
       glInitialized_(false),
-      lineShader_(0), fillShader_(0), gridShader_(0),
+      seriesShader_(0), lineShader_(0), fillShader_(0), gridShader_(0),
       gridVAO_(0), gridVBO_(0),
       axisVAO_(0), axisVBO_(0),
       rectVAO_(0), rectVBO_(0),
@@ -262,10 +276,9 @@ LinePlot::~LinePlot()
         
         // Clean up FreeType
         signal_ui::CleanupFreeTypeLib(ftLibrary_);
-        //signal_ui::CleanupFreeTypeFace(labelFont_);
-        //signal_ui::CleanupFreeTypeFace(titleFont_);
         
         // Delete shaders
+        if (seriesShader_) glDeleteProgram(seriesShader_);
         if (lineShader_) glDeleteProgram(lineShader_);
         if (fillShader_) glDeleteProgram(fillShader_);
         if (gridShader_) glDeleteProgram(gridShader_);
@@ -516,6 +529,24 @@ void LinePlot::OnSysColourChanged(wxSysColourChangedEvent& event) {
     event.Skip();
 }
 
+void LinePlot::OnMouseWheel(wxMouseEvent& event)
+{
+    const wxPoint pos = event.GetPosition();
+
+    // Use the internally computed x-axis rect
+    if (xAxisRect_.Contains(pos))
+    {
+        if (onXAxisScroll)
+            onXAxisScroll(event.GetWheelRotation());
+
+        // Consume — do not propagate further
+        return;
+    }
+
+    // Outside x-axis area: allow normal LinePlot handling
+    event.Skip();
+}
+
 // ===========================================================================
 // OpenGL initialization
 // ===========================================================================
@@ -546,13 +577,10 @@ void LinePlot::InitializeGL()
     glBindVertexArray(0);
 
     // Compile shaders
-    lineShader_ = signal_ui::CompileShader(lineShader,                  solidColourFragmentShader);
-    uniforms_.color = glGetUniformLocation(lineShader_, "u_color");
-    uniforms_.xMin  = glGetUniformLocation(lineShader_, "uXMin");
-    uniforms_.xMax  = glGetUniformLocation(lineShader_, "uXMax");
-    uniforms_.yMin  = glGetUniformLocation(lineShader_, "uYMin");
-    uniforms_.yMax  = glGetUniformLocation(lineShader_, "uYMax");
+    seriesShader_ = signal_ui::CompileShader(seriesShader,              solidColourFragmentShader);
+    uniforms_.Resolve(seriesShader_);
 
+    lineShader_ = signal_ui::CompileShader(simpleVertexShader,          solidColourFragmentShader);
     fillShader_ = signal_ui::CompileShader(simpleVertexShader,          solidColourFragmentShader);
     gridShader_ = signal_ui::CompileShader(simpleVertexShader,          solidColourFragmentShader);
     textShader_ = signal_ui::CompileShader(signal_ui::textVertexShader, signal_ui::textFragmentShader);
@@ -838,6 +866,13 @@ void LinePlot::ComputeMargins()
     // Title band
     if (!title_.IsEmpty())
         marginTop_ += 25 + edgePad;
+
+    xAxisRect_ = wxRect(
+            marginLeft_,                                    // starts after left y-axes
+            GetClientSize().GetHeight() - marginBottom_,    // top edge of bottom band
+            GetClientSize().GetWidth() - marginLeft_ - marginRight_,  // plot width only
+            marginBottom_                                   // full x-axis band height
+        );
 }
 
 void LinePlot::UpdateColoursFromSystem()
@@ -1029,7 +1064,6 @@ void LinePlot::UpdateSeriesBuffers()
         }
     }
 }
-
 
 void LinePlot::UpdateGridBuffers()
 {
@@ -1278,6 +1312,7 @@ void LinePlot::RenderAxes()
     GetClientSize(&w, &h);
     glViewport(0, 0, w, h);
     
+    
     float proj[16] = {
         2.0f/w, 0.0f, 0.0f, 0.0f,
         0.0f, -2.0f/h, 0.0f, 0.0f,
@@ -1286,7 +1321,8 @@ void LinePlot::RenderAxes()
     };
     
     glUniformMatrix4fv(glGetUniformLocation(lineShader_, "u_proj"), 1, GL_FALSE, proj);
-    glUniform4f(glGetUniformLocation(lineShader_, "u_color"), 1.0f, 1.0f, 1.0f, 1.0f);
+    glUniform4f(glGetUniformLocation(lineShader_, "u_color"),
+                gridColourR_, gridColourG_, gridColourB_, 1.0f);
     
     glBindVertexArray(axisVAO_);
     
@@ -1301,48 +1337,45 @@ void LinePlot::RenderAxes()
 
 void LinePlot::RenderSeries()
 {
-    if (seriesBuffers_.empty()) return;
+    glUseProgram(seriesShader_);
 
-    glUseProgram(lineShader_);
+    int w, h;
+    GetClientSize(&w, &h);
+    glViewport(0, 0, w, h);
+    
+    float proj[16] = {
+        2.0f/w, 0.0f, 0.0f, 0.0f,
+        0.0f, -2.0f/h, 0.0f, 0.0f,
+        0.0f, 0.0f, -1.0f, 0.0f,
+        -1.0f, 1.0f, 0.0f, 1.0f
+    };
 
-    glEnable(GL_LINE_SMOOTH);
-    glEnable(GL_BLEND);
-    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+    // Upload shared projection — identical matrix used by axis shader
+    glUniformMatrix4fv(glGetUniformLocation(seriesShader_, "uProjection"), 1, GL_FALSE, proj);
 
-    glLineWidth(1.0f);
+    const FloatRect pr = PlotRect();
+
+    glUniform1f(uniforms_.scrLeft,   pr.GetLeft());
+    glUniform1f(uniforms_.scrRight,  pr.GetRight());
+    glUniform1f(uniforms_.scrTop,    pr.GetTop());
+    glUniform1f(uniforms_.scrBottom, pr.GetBottom());
 
     for (const auto& sb : seriesBuffers_) {
-        if (sb.vertexCount < 2) continue;
+        if (!sb.valid() || sb.vertexCount == 0) continue;
 
-        // Use global X axis range
-        float xMin = 0.0f;
-        float xMax = static_cast<float>(xMax_ - xMin_);
+        glUniform1f(uniforms_.xMin, sb.xMin);
+        glUniform1f(uniforms_.xMax, sb.xMax);
+        glUniform1f(uniforms_.yMin, sb.yMin);
+        glUniform1f(uniforms_.yMax, sb.yMax);
 
-        // Use per-axis Y range from yAxes_ (set by ApplyAutoscale)
-        float yMin = sb.yMin;
-        float yMax = sb.yMax;
-        if (sb.yAxisIndex < static_cast<int>(yAxes_.size())) {
-            yMin = static_cast<float>(yAxes_[sb.yAxisIndex].min);
-            yMax = static_cast<float>(yAxes_[sb.yAxisIndex].max);
-        }
-
-        glUniform1f(uniforms_.xMin,  xMin);
-        glUniform1f(uniforms_.xMax,  xMax);
-        glUniform1f(uniforms_.yMin,  yMin);
-        glUniform1f(uniforms_.yMax,  yMax);
-        glUniform4f(uniforms_.color,
-                    sb.colour.r,
-                    sb.colour.g,
-                    sb.colour.b,
-                    1.0f);
+        glUniform4f(glGetUniformLocation(seriesShader_, "u_color"),
+                    sb.colour.r, sb.colour.g, sb.colour.b, 1.0f);
 
         glBindVertexArray(sb.vao);
         glDrawArrays(GL_LINE_STRIP, 0, sb.vertexCount);
         glBindVertexArray(0);
     }
 
-    glDisable(GL_LINE_SMOOTH);
-    glDisable(GL_BLEND);
     glUseProgram(0);
 }
 

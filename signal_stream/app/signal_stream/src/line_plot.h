@@ -229,11 +229,15 @@ public:
     /// Get current time axis configuration
     TimeAxisConfig GetTimeAxisConfig() const { return timeAxisConfig_; }
 
+    // Hooks
+    std::function<void(int wheelDelta)> onXAxisScroll;
+
 protected:
     void OnPaint(wxPaintEvent& event);
     void OnResize(wxSizeEvent& event);
     void OnMouseMotion(wxMouseEvent& event);
     void OnSysColourChanged(wxSysColourChangedEvent& event);
+    void OnMouseWheel(wxMouseEvent& event);
 
 private:
     // -----------------------------------------------------------------------
@@ -320,15 +324,32 @@ private:
     // -----------------------------------------------------------------------
     
     // Shader programs
-    GLuint lineShader_;
-    struct ShaderUniforms {
-        GLint color = -1;
-        GLint xMin  = -1;
-        GLint xMax  = -1;
-        GLint yMin  = -1;
-        GLint yMax  = -1;
+    GLuint seriesShader_;
+    struct SeriesShaderUniforms {
+        GLint xMin       = -1;
+        GLint xMax       = -1;
+        GLint yMin       = -1;
+        GLint yMax       = -1;
+        GLint scrLeft    = -1;
+        GLint scrRight   = -1;
+        GLint scrTop     = -1;
+        GLint scrBottom  = -1;
+        GLint resolution = -1;
+
+        void Resolve(GLuint program) {
+            xMin       = glGetUniformLocation(program, "uXMin");
+            xMax       = glGetUniformLocation(program, "uXMax");
+            yMin       = glGetUniformLocation(program, "uYMin");
+            yMax       = glGetUniformLocation(program, "uYMax");
+            scrLeft    = glGetUniformLocation(program, "uScrLeft");
+            scrRight   = glGetUniformLocation(program, "uScrRight");
+            scrTop     = glGetUniformLocation(program, "uScrTop");
+            scrBottom  = glGetUniformLocation(program, "uScrBottom");
+            resolution = glGetUniformLocation(program, "uResolution");
+        }
     };
-    ShaderUniforms uniforms_;
+    SeriesShaderUniforms uniforms_;
+    GLuint lineShader_;
     GLuint fillShader_;
     GLuint gridShader_;
     GLuint textShader_;
@@ -503,9 +524,10 @@ private:
         float GetHeight() const { return height; }
     };
     FloatRect PlotRect() const;
+    wxRect xAxisRect_;
     
-    /// Convert data coordinates to screen coordinates
-    /// yAxisIndex specifies which Y-axis to use for vertical scaling
+    // Convert data coordinates to screen coordinates
+    // yAxisIndex specifies which Y-axis to use for vertical scaling
     void DataToScreen(uint64_t dx, double dy, int yAxisIndex, float& sx, float& sy) const;
 
     std::pair<float, float> ComputeYRange(const std::vector<ChunkView>& chunks, float paddingFraction);
