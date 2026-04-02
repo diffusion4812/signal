@@ -68,14 +68,14 @@ void App::Config::load(const std::filesystem::path& path) {
 bool App::OnInit() {
     config_.load("config.json");
 
-    for (const auto& lib : config_.libraries) {
-        std::vector<signal_forge::BlockTemplate> block_templates = parse_header(lib.header);
-        for (auto& bt : block_templates) {
-            bt.library = lib.library;
-            bt.header = lib.header;
-            graph_.RegisterBlockTemplate(std::move(bt));
-        }
-    }
+//    for (const auto& lib : config_.libraries) {
+//        std::vector<signal_forge::BlockTemplate> block_templates = parse_header(lib.header);
+//        for (auto& bt : block_templates) {
+//            bt.library = lib.library;
+//            bt.header = lib.header;
+//            graph_.RegisterBlockTemplate(std::move(bt));
+//        }
+//    }
 
     auto *frame = new MainFrame();
     frame->Show(true);

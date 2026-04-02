@@ -22,6 +22,7 @@ public:
 private:
     wxGLContext *m_context = nullptr;
     Renderer     m_renderer;
+    bool         m_glInitialized = false;
     Graph       *m_graph;
 
     // ── Camera ───────────────────────────────────────────────────────────────

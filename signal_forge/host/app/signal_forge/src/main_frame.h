@@ -4,6 +4,7 @@
 #include <wx/process.h>
 #include <wx/txtstrm.h>
 #include <wx/wfstream.h>
+#include <wx/treectrl.h>
 #include <wx/propgrid/propgrid.h>
 #include <wx/sckipc.h>
 #include <memory>
@@ -109,25 +110,92 @@ public:
     ~MainFrame();
 
 private:
+    struct ProjectManifest
+    {
+        std::vector<wxString> block_defs;
+        std::vector<wxString> tasks;
+    };
+
+    struct GraphDocument
+    {
+        enum class DocumentType
+        {
+            BlockDefinition,
+            Task
+        };
+        wxString file_path;
+        wxString display_name;
+        bool dirty = false;
+        DocumentType type = DocumentType::BlockDefinition;
+
+        signal_forge::Generator::Result result_;
+        std::string compiled_filename_;
+
+        std::unique_ptr<signal_forge::Graph> graph;
+        wxPanel* panel = nullptr;
+        signal_forge::NodeCanvas* canvas = nullptr;
+    };
+
+
+    bool LoadProjectManifest(const wxString& projectFilePath);
+    void PopulateProjectTree();
     void AddViewToggle(wxMenu* menu, int id, const wxString& label, const wxString& paneName);
 
     void OnGenerate(wxCommandEvent& WXUNUSED(evt));
     void OnCompile(wxCommandEvent&  WXUNUSED(evt));
     void OnTransfer(wxCommandEvent& WXUNUSED(evt));
     void OnGoOnline(wxCommandEvent& WXUNUSED(evt));
+    wxString MakeProjectRelativePath(const wxString& absolutePath) const;
+    bool ManifestContainsPath(const std::vector<wxString>& entries, const wxString& relPath) const;
+    bool EnsureDocumentInProjectManifest(GraphDocument* doc);
+    bool SaveProjectManifest();
     void OnOpen(wxCommandEvent&     WXUNUSED(evt));
+    bool SaveDocument(GraphDocument* doc);
+    bool SaveDocumentAs(GraphDocument* doc);
     void OnSave(wxCommandEvent&     WXUNUSED(evt));
     void OnSaveAs(wxCommandEvent&   WXUNUSED(evt));
     void OnExit(wxCommandEvent&     WXUNUSED(evt));
+    void OpenGraphDocument(const wxString& filePath);
+    GraphDocument* FindDocumentByPage(wxWindow* page);
+    GraphDocument* FindDocumentByCanvas(signal_forge::NodeCanvas* canvas);
+    void UpdateDocumentTabTitle(GraphDocument* doc);
+    void SetDocumentDirty(GraphDocument* doc, bool dirty);
+    void OnEditorPageClose(wxAuiNotebookEvent& evt);
+    void OnEditorPageChanged(wxAuiNotebookEvent& evt);
+    void OnProjectTreeItemActivated(wxTreeEvent& evt);
     void OnNodeSelected(wxCommandEvent& evt);
     void WriteInjectNodeFields(signal_forge::InjectNode *inject);
+    void OnGraphModified(wxCommandEvent& evt);
     void OnPropertyGridChanged(wxPropertyGridEvent& evt);
 
-    wxString m_currentFilePath;
+    wxString m_currentProjectPath;
+    wxString m_currentProjectFile;
+    wxString m_currentGraphFilePath;
+
+    ProjectManifest m_projectManifest;
 
     wxAuiManager aui_mgr_;
 
-    signal_forge::NodeCanvas* canvas_;
+    wxAuiNotebook* editor_notebook_ = nullptr;
+    std::vector<std::unique_ptr<GraphDocument>> open_documents_;
+
+    class ProjectTreeItemData : public wxTreeItemData
+    {
+    public:
+        enum class ItemType
+        {
+            Folder,
+            BlockDefinitionFile,
+            TaskFile
+        };
+
+        ProjectTreeItemData(ItemType type, const wxString& path = wxEmptyString)
+            : type_(type), path_(path) {}
+
+        ItemType type_;
+        wxString path_;
+    };
+    wxTreeCtrl*       project_tree_ctrl_;
 
     wxStyledTextCtrl* c_source_ctrl_;
     wxTextCtrl*       log_ctrl_;

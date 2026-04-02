@@ -87,17 +87,27 @@ NodeCanvas::NodeCanvas(wxWindow *parent, Graph *graph)
 void NodeCanvas::InitGL()
 {
     SetCurrent(*m_context);
-    static bool s_initialized = false;
-    if (!s_initialized) {
-        glewExperimental = GL_TRUE;
-        glewInit();
 
-        m_renderer.Init(); // compile shaders, create VAOs/VBOs
+    static bool s_glewInitialized = false;
+    if (!s_glewInitialized) {
+        glewExperimental = GL_TRUE;
+        GLenum err = glewInit();
+        if (err != GLEW_OK) {
+            wxLogError("GLEW init failed: %s", glewGetErrorString(err));
+            return;
+        }
+        glGetError(); // clear GLEW's harmless GL_INVALID_ENUM on some drivers
+        s_glewInitialized = true;
+    }
+
+    if (!m_glInitialized) {
+        m_renderer.Init();
 
         glEnable(GL_BLEND);
         glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
         glEnable(GL_MULTISAMPLE);
-        s_initialized = true;
+
+        m_glInitialized = true;
     }
 }
 
